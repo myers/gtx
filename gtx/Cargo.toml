@@ -1,6 +1,6 @@
 [package]
 name = "gtx"
-version = "0.6.5"
+version = "0.7.0"
 edition = "2024"
 description = "Gitea CLI - like gh, but for Gitea"
 license = "MIT"
@@ -32,6 +32,7 @@ jaq-core = "3"
 jaq-std = "3"
 jaq-json = "2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+glob = "0.3.4"
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

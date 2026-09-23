@@ -76,8 +76,33 @@ struct ViewArgs {
 
 #[derive(Args)]
 struct DownloadArgs {
-    /// Release ID
-    id: i64,
+    /// Release tag (the latest release when omitted; then `--pattern` or `--archive` is required)
+    #[arg(required_unless_present_any = ["pattern", "archive"])]
+    tag: Option<String>,
+
+    /// Download only assets that match a glob pattern (repeatable)
+    #[arg(short, long)]
+    pattern: Vec<String>,
+
+    /// Download the source code archive in the specified format
+    #[arg(short = 'A', long, value_parser = ["zip", "tar.gz"], conflicts_with = "pattern")]
+    archive: Option<String>,
+
+    /// The directory to download files into [default: .]
+    #[arg(short = 'D', long)]
+    dir: Option<String>,
+
+    /// The file to write a single asset to (use "-" to write to standard output)
+    #[arg(short = 'O', long, conflicts_with = "dir")]
+    output: Option<String>,
+
+    /// Overwrite existing files of the same name
+    #[arg(long)]
+    clobber: bool,
+
+    /// Skip downloading when files of the same name exist
+    #[arg(long, conflicts_with = "clobber")]
+    skip_existing: bool,
 }
 
 #[derive(Args)]
@@ -366,6 +391,13 @@ async fn view_release(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()>
     Ok(())
 }
 
+/// What `release download` fetches: a named asset, or the source archive
+/// whose name comes from the response's `Content-Disposition`.
+struct Download {
+    url: String,
+    name: Option<String>,
+}
+
 async fn download_release(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
@@ -373,44 +405,163 @@ async fn download_release(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Re
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let rel = api
-        .repo_get_release()
-        .owner(owner)
-        .repo(repo)
-        .id(args.id)
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-        .into_inner();
+    let rel = match &args.tag {
+        Some(tag) => api
+            .repo_get_release_by_tag()
+            .owner(owner)
+            .repo(repo)
+            .tag(tag)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner(),
+        None => api
+            .repo_get_latest_release()
+            .owner(owner)
+            .repo(repo)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner(),
+    };
+    let tag = rel.tag_name.as_deref().unwrap_or("");
 
-    if rel.assets.is_empty() {
-        eprintln!("No assets to download for release #{}", args.id);
-        return Ok(());
+    let downloads = if let Some(format) = &args.archive {
+        let url = if format == "zip" { &rel.zipball_url } else { &rel.tarball_url };
+        let url = url
+            .clone()
+            .ok_or_else(|| eyre::eyre!("Release {tag} has no {format} archive URL"))?;
+        vec![Download { url, name: None }]
+    } else {
+        let patterns = args
+            .pattern
+            .iter()
+            .map(|p| glob::Pattern::new(p).map_err(|e| eyre::eyre!("invalid pattern {p:?}: {e}")))
+            .collect::<Result<Vec<_>>>()?;
+        let mut downloads = Vec::new();
+        for asset in &rel.assets {
+            let name = asset.name.as_deref().unwrap_or("");
+            if !patterns.is_empty() && !patterns.iter().any(|p| p.matches(name)) {
+                continue;
+            }
+            let url = asset
+                .browser_download_url
+                .clone()
+                .ok_or_else(|| eyre::eyre!("Asset {name} has no download URL"))?;
+            downloads.push(Download { url, name: Some(name.to_string()) });
+        }
+        if downloads.is_empty() {
+            if rel.assets.is_empty() {
+                eyre::bail!("no assets to download");
+            }
+            eyre::bail!("no assets match the file pattern");
+        }
+        downloads
+    };
+
+    if args.output.is_some() && downloads.len() > 1 {
+        eyre::bail!(
+            "unable to write more than one asset with `--output`, got {} assets",
+            downloads.len()
+        );
     }
 
-    for asset in &rel.assets {
-        let url = asset
-            .browser_download_url
-            .as_deref()
-            .ok_or_else(|| eyre::eyre!("Asset has no download URL"))?;
-        let filename = asset.name.as_deref().unwrap_or("download");
+    let dir = std::path::Path::new(args.dir.as_deref().unwrap_or(""));
+    if !dir.as_os_str().is_empty() {
+        std::fs::create_dir_all(dir)?;
+    }
 
-        eprintln!("Downloading {filename}...");
+    for download in downloads {
+        // Asset names are known up front; check before fetching anything.
+        if let Some(name) = &download.name {
+            let dest = destination(args, dir, name)?;
+            if !should_write(args, dest.as_deref())? {
+                continue;
+            }
+        }
 
         let resp = api
-            .download(url)
+            .download(&download.url)
             .await
             .map_err(|e| eyre::eyre!("Download failed: {e}"))?;
         let resp = gitea_api::error_for_status(resp)
             .await
             .map_err(|e| eyre::eyre!("Download failed: {e}"))?;
 
+        let name = match download.name {
+            Some(name) => name,
+            None => content_disposition_filename(resp.headers()).unwrap_or_else(|| {
+                let ext = args.archive.as_deref().unwrap_or("zip");
+                format!("{repo}-{tag}.{ext}")
+            }),
+        };
+        let dest = destination(args, dir, &name)?;
+        if !should_write(args, dest.as_deref())? {
+            continue;
+        }
+
         let bytes = resp.bytes().await?;
-        std::fs::write(filename, &bytes)?;
-        eprintln!("  Saved {filename} ({} bytes)", bytes.len());
+        match dest {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(path, &bytes)?;
+            }
+            None => {
+                use std::io::Write;
+                std::io::stdout().write_all(&bytes)?;
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Where a download named `name` goes: `--output` if given (`None` for
+/// stdout), else `<dir>/<name>`, refusing names that would land elsewhere.
+fn destination(
+    args: &DownloadArgs,
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<Option<std::path::PathBuf>> {
+    match args.output.as_deref() {
+        Some("-") => return Ok(None),
+        Some(output) => return Ok(Some(output.into())),
+        None => {}
+    }
+    let mut parts = std::path::Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(Some(dir.join(name))),
+        _ => Err(eyre::eyre!("Refusing to download asset with unsafe name {name:?}")),
+    }
+}
+
+/// Whether to write `dest`, per `--clobber` / `--skip-existing` (like `gh`,
+/// an existing file is an error when neither is given).
+fn should_write(args: &DownloadArgs, dest: Option<&std::path::Path>) -> Result<bool> {
+    let Some(dest) = dest.filter(|d| d.exists()) else {
+        return Ok(true);
+    };
+    if args.skip_existing {
+        return Ok(false);
+    }
+    if !args.clobber {
+        eyre::bail!(
+            "{} already exists (use `--clobber` to overwrite file or `--skip-existing` to skip file)",
+            dest.display()
+        );
+    }
+    Ok(true)
+}
+
+/// The `filename` from a `Content-Disposition: attachment; filename="..."` header.
+fn content_disposition_filename(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let value = headers.get(reqwest::header::CONTENT_DISPOSITION)?.to_str().ok()?;
+    value.split(';').find_map(|part| {
+        let name = part.trim().strip_prefix("filename=")?;
+        Some(name.trim_matches('"').to_string()).filter(|n| !n.is_empty())
+    })
 }
 
 async fn delete_release(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result<()> {
