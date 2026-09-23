@@ -372,7 +372,10 @@ mod tests {
     fn test_curl_masks_token_by_default() {
         let url: url::Url = "https://gt.example/api/v1/user".parse().unwrap();
         let line = build_curl_command("GET", &url, &[], None, "aafe123456789a263", false);
-        assert!(line.contains("Authorization: token ***a263"), "got: {line}");
+        assert!(
+            line.contains(&format!("Authorization: token {}", gitea_api::verbose::REDACTED)),
+            "got: {line}"
+        );
         assert!(!line.contains("aafe123456789a263"), "raw token leaked: {line}");
         assert!(line.contains("curl -X GET"));
         assert!(line.contains("https://gt.example/api/v1/user"));

@@ -15,7 +15,7 @@ use progenitor_client::{ClientHooks, ClientInfo, Error, OperationInfo};
 pub struct VerboseConfig {
     /// 0 = off, 1 = headers only, 2+ = headers + bodies.
     pub level: u8,
-    /// When false, redact `Authorization` and `Cookie` header values.
+    /// When false, redact `Authorization`, `Cookie`/`Set-Cookie` and `*-token` header values.
     pub show_secrets: bool,
 }
 
@@ -63,31 +63,36 @@ pub fn apply_auth_headers(request: &mut reqwest::Request) {
     }
 }
 
-/// Mask credential-bearing header values, leaving the last 4 chars visible
-/// when the value is long enough (so users can disambiguate which token).
+/// Fixed-width stand-in for a secret, as gh's debug transport (httpretty)
+/// prints it. Its length never depends on the secret's.
+pub const REDACTED: &str = "████████████████████";
+
+/// Redact credential-bearing header values the way `gh`'s `GH_DEBUG=api`
+/// output does: `Authorization` keeps only its scheme (`token █…`),
+/// `Cookie`/`Set-Cookie` keep only cookie names (and `Set-Cookie`'s
+/// attributes), and any other `*-token` header is replaced outright. Nothing
+/// of the secret — not even its length — is revealed.
 pub fn mask_header_value(name: &str, value: &str) -> String {
     let lower = name.to_ascii_lowercase();
-    let is_secret = lower == "authorization" || lower == "cookie" || lower.ends_with("-token");
-    if !is_secret {
-        return value.to_string();
+    match lower.as_str() {
+        "authorization" | "proxy-authorization" => match value.trim().split_once(' ') {
+            Some((scheme, _)) => format!("{scheme} {REDACTED}"),
+            None => REDACTED.to_string(),
+        },
+        "cookie" => value.split("; ").map(mask_cookie_pair).collect::<Vec<_>>().join("; "),
+        "set-cookie" => match value.split_once(';') {
+            Some((pair, attrs)) => format!("{};{attrs}", mask_cookie_pair(pair)),
+            None => mask_cookie_pair(value),
+        },
+        _ if lower.ends_with("-token") => REDACTED.to_string(),
+        _ => value.to_string(),
     }
-
-    // Authorization tends to be `token abcdef...` or `Bearer abcdef...`.
-    if let Some(rest) = value.strip_prefix("token ") {
-        return format!("token {}", mask_secret(rest));
-    }
-    if let Some(rest) = value.strip_prefix("Bearer ") {
-        return format!("Bearer {}", mask_secret(rest));
-    }
-    mask_secret(value)
 }
 
-fn mask_secret(s: &str) -> String {
-    let trimmed = s.trim();
-    if trimmed.len() > 8 {
-        format!("***{}", &trimmed[trimmed.len() - 4..])
-    } else {
-        "***".to_string()
+fn mask_cookie_pair(pair: &str) -> String {
+    match pair.split_once('=') {
+        Some((name, _)) => format!("{name}={REDACTED}"),
+        None => REDACTED.to_string(),
     }
 }
 
@@ -238,39 +243,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mask_token_header() {
+    fn mask_authorization_keeps_only_scheme() {
         assert_eq!(
             mask_header_value("Authorization", "token aafe123456789a263"),
-            "token ***a263",
+            format!("token {REDACTED}"),
         );
         assert_eq!(
             mask_header_value("authorization", "Bearer xyz12345abcdEF98"),
-            "Bearer ***EF98",
+            format!("Bearer {REDACTED}"),
         );
+        assert_eq!(mask_header_value("Authorization", "bare"), REDACTED);
     }
 
     #[test]
-    fn mask_short_token() {
+    fn mask_short_token_reveals_nothing() {
+        // A 9-char token used to leak its last 4 chars (#18).
+        let shown = mask_header_value("Authorization", "token 123456789");
+        assert_eq!(shown, format!("token {REDACTED}"));
+        assert!(!shown.contains("6789"), "{shown}");
         assert_eq!(
             mask_header_value("Authorization", "token short"),
-            "token ***",
+            format!("token {REDACTED}"),
         );
     }
 
     #[test]
-    fn mask_cookie() {
+    fn mask_is_char_safe() {
         assert_eq!(
-            mask_header_value("Cookie", "session=verysecretcookievalue"),
-            "***alue",
+            mask_header_value("Authorization", "token abcdéfghé"),
+            format!("token {REDACTED}"),
+        );
+        assert_eq!(mask_header_value("X-Csrf-Token", "ééééééééé"), REDACTED);
+        assert_eq!(mask_header_value("Cookie", "é=ééééééé"), format!("é={REDACTED}"));
+    }
+
+    #[test]
+    fn mask_cookie_keeps_names() {
+        assert_eq!(
+            mask_header_value("Cookie", "session=verysecretcookievalue; lang=en"),
+            format!("session={REDACTED}; lang={REDACTED}"),
+        );
+    }
+
+    #[test]
+    fn mask_set_cookie_keeps_name_and_attributes() {
+        assert_eq!(
+            mask_header_value("Set-Cookie", "i_like_gitea=abc123secret; Path=/; HttpOnly"),
+            format!("i_like_gitea={REDACTED}; Path=/; HttpOnly"),
         );
     }
 
     #[test]
     fn mask_x_token_header() {
-        assert_eq!(
-            mask_header_value("X-Csrf-Token", "abcdef1234567890"),
-            "***7890",
-        );
+        assert_eq!(mask_header_value("X-Csrf-Token", "abcdef1234567890"), REDACTED);
     }
 
     #[test]
