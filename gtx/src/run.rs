@@ -258,7 +258,7 @@ struct DownloadArgs {
     /// Run ID
     id: i64,
 
-    /// Output directory (defaults to current directory)
+    /// Directory to extract artifacts into; each lands in `<dir>/<artifact name>/`
     #[arg(short, long, default_value = ".")]
     dir: String,
 }
@@ -613,6 +613,16 @@ async fn watch_one(
     }
 }
 
+/// `<out_dir>/<name>`, refusing artifact names that would land anywhere else
+/// (`..`, absolute paths, nested separators).
+fn artifact_dir(out_dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf> {
+    let mut parts = std::path::Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(out_dir.join(name)),
+        _ => Err(eyre::eyre!("Refusing to download artifact with unsafe name {name:?}")),
+    }
+}
+
 async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
@@ -645,22 +655,36 @@ async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> 
             .as_i64()
             .ok_or_else(|| eyre::eyre!("Artifact missing ID"))?;
 
-        let download_path = format!(
-            "repos/{owner}/{repo}/actions/artifacts/{artifact_id}"
-        );
-        let resp = api
-            .raw_request(gitea_api::Method::GET, &download_path, None)
-            .await
-            .map_err(|e| eyre::eyre!("{e}"))?;
+        if artifact["expired"].as_bool() == Some(true) {
+            eprintln!("Skipping expired artifact {name}");
+            continue;
+        }
+        let dest = artifact_dir(out_dir, name)?;
+
+        // `artifacts/{id}` is the metadata; the bytes are at `/zip`, which
+        // Gitea answers with a redirect to a signed blob URL. `download`
+        // only attaches the token for this instance's origin, and reqwest
+        // drops it when a redirect leaves that origin.
+        let url = api.url_for(&format!(
+            "repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip"
+        ));
+        let resp = api.download(&url).await.map_err(|e| eyre::eyre!("{e}"))?;
         let resp = gitea_api::error_for_status(resp)
             .await
             .map_err(|e| eyre::eyre!("Failed to download {name}: {e}"))?;
-
         let bytes = resp.bytes().await?;
-        let filename = format!("{name}.zip");
-        let dest = out_dir.join(&filename);
-        std::fs::write(&dest, &bytes)?;
-        eprintln!("Downloaded {filename} ({} bytes)", bytes.len());
+
+        // Like `gh run download`, unpack each artifact into `<dir>/<name>/`.
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
+            .map_err(|e| eyre::eyre!("Downloaded {name} is not a zip archive: {e}"))?;
+        archive
+            .extract(&dest)
+            .map_err(|e| eyre::eyre!("Failed to extract {name}: {e}"))?;
+        eprintln!(
+            "Downloaded {name} ({} bytes) to {}",
+            bytes.len(),
+            dest.display()
+        );
     }
 
     Ok(())
@@ -669,6 +693,15 @@ async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_dir_rejects_names_that_escape_out_dir() {
+        let out = std::path::Path::new("/tmp/out");
+        assert_eq!(artifact_dir(out, "logs").unwrap(), out.join("logs"));
+        for bad in ["..", "../x", "a/b", "/etc", ".", ""] {
+            assert!(artifact_dir(out, bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn terminal_status_recognises_completed_and_outcome_aliases() {

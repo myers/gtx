@@ -6,6 +6,42 @@ use std::sync::{Arc, Mutex};
 
 use assert_cmd::Command;
 
+/// A full reply from [`FakeGitea::start_raw`]: status, extra headers, and body bytes.
+pub struct Reply {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Reply {
+    /// A JSON reply, as [`FakeGitea::start_with`] sends.
+    pub fn json(status: u16, body: impl Into<String>) -> Self {
+        Reply {
+            status,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: body.into().into_bytes(),
+        }
+    }
+
+    /// A 302 to `location`.
+    pub fn redirect(location: impl Into<String>) -> Self {
+        Reply {
+            status: 302,
+            headers: vec![("Location".into(), location.into())],
+            body: Vec::new(),
+        }
+    }
+
+    /// A 200 with a binary body.
+    pub fn bytes(content_type: &str, body: Vec<u8>) -> Self {
+        Reply {
+            status: 200,
+            headers: vec![("Content-Type".into(), content_type.into())],
+            body,
+        }
+    }
+}
+
 /// Fake Gitea server: answers each request with `route(method, path_and_query)`
 /// as `(status, body)` and records `"METHOD target"` for every request it saw.
 pub struct FakeGitea {
@@ -21,6 +57,14 @@ impl FakeGitea {
     }
 
     pub fn start_with(route: impl Fn(&str, &str) -> (u16, String) + Send + 'static) -> Self {
+        Self::start_raw(move |method, target| {
+            let (status, body) = route(method, target);
+            Reply::json(status, body)
+        })
+    }
+
+    /// Answer each request with the full [`Reply`] `route(method, path_and_query)` returns.
+    pub fn start_raw(route: impl Fn(&str, &str) -> Reply + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -59,21 +103,29 @@ impl FakeGitea {
                 let mut parts = request_line.split_whitespace();
                 let method = parts.next().unwrap_or("").to_string();
                 let target = parts.next().unwrap_or("").to_string();
-                let (status, body) = route(&method, &target);
+                let reply = route(&method, &target);
                 seen_thread
                     .lock()
                     .unwrap()
                     .push(format!("{method} {target}"));
                 auth_thread.lock().unwrap().push(authorization);
-                let resp = if status == 204 {
-                    "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_string()
+                let mut head = if reply.status == 204 {
+                    "HTTP/1.1 204 No Content\r\n".to_string()
                 } else {
                     format!(
-                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
+                        "HTTP/1.1 {} X\r\nContent-Length: {}\r\n",
+                        reply.status,
+                        reply.body.len()
                     )
                 };
-                let _ = stream.write_all(resp.as_bytes());
+                for (name, value) in &reply.headers {
+                    head.push_str(&format!("{name}: {value}\r\n"));
+                }
+                head.push_str("Connection: close\r\n\r\n");
+                let _ = stream.write_all(head.as_bytes());
+                if reply.status != 204 {
+                    let _ = stream.write_all(&reply.body);
+                }
             }
         });
         FakeGitea { url, seen, auth }
