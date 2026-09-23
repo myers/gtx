@@ -191,6 +191,25 @@ fn config_list_recurses_and_masks_tokens() {
     assert!(stdout.contains("aliases.co = pr checkout\n"), "{stdout}");
     assert!(!stdout.contains("old-token"), "{stdout}");
     assert!(!stdout.contains("work-token"), "{stdout}");
+    // gh-style: no prefix underscore, so every character is starred.
+    assert!(stdout.contains("default.token = *********\n"), "{stdout}");
+    assert!(stdout.contains("servers.work.token = **********\n"), "{stdout}");
+}
+
+#[test]
+fn auth_status_masks_non_ascii_token_without_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[default]\nurl = \"https://gitea.example.com\"\ntoken = \"abcdefg\u{e9}xyz\"\n",
+    )
+    .unwrap();
+    gtx(&path)
+        .args(["auth", "status", "--no-check"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Token: ***********\n"));
 }
 
 #[test]

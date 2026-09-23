@@ -201,14 +201,17 @@ fn token() -> Result<()> {
     Ok(())
 }
 
+/// Mask a token for display the way `gh auth status` does: keep any prefix up
+/// to and including the last `_` (e.g. `gho_`) and replace every remaining
+/// character with `*`. Gitea tokens are bare hex, so they come out fully
+/// starred. Works on chars, so non-ASCII tokens can't panic.
 pub(crate) fn mask_token(token: &str) -> String {
-    if token.len() > 8 {
-        format!("{}...{}", &token[..4], &token[token.len() - 4..])
-    } else if !token.is_empty() {
-        "****".to_string()
-    } else {
-        "(not set)".to_string()
+    if token.is_empty() {
+        return "(not set)".to_string();
     }
+    let prefix = token.rfind('_').map_or("", |i| &token[..=i]);
+    let hidden = token[prefix.len()..].chars().count();
+    format!("{prefix}{}", "*".repeat(hidden))
 }
 
 fn logout() -> Result<()> {
@@ -351,14 +354,29 @@ fn git_credential(args: &GitCredentialArgs) -> Result<()> {
 mod tests {
     use super::mask_token;
 
+    // gh's displayToken: keep the prefix up to the last `_`, star the rest.
     #[test]
-    fn mask_long_token() {
-        assert_eq!(mask_token("aafe123456789a263"), "aafe...a263");
+    fn mask_prefixed_token_like_gh() {
+        assert_eq!(mask_token("gho_abc123"), "gho_******");
     }
 
     #[test]
-    fn mask_short_token() {
-        assert_eq!(mask_token("short"), "****");
+    fn mask_gitea_token_fully() {
+        let t = "aafe123456789a263aafe123456789a263abcdef";
+        assert_eq!(mask_token(t), "*".repeat(40));
+    }
+
+    #[test]
+    fn mask_short_token_reveals_nothing() {
+        assert_eq!(mask_token("work-token"), "**********");
+        assert_eq!(mask_token("short"), "*****");
+    }
+
+    #[test]
+    fn mask_non_ascii_token_does_not_panic() {
+        // byte len-4 lands inside `é`; the old byte slicing panicked here.
+        assert_eq!(mask_token("abcdefgéxyz"), "***********");
+        assert_eq!(mask_token("pré_fé"), "pré_**");
     }
 
     #[test]
