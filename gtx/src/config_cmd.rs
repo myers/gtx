@@ -44,9 +44,7 @@ impl ConfigCommand {
 }
 
 fn config_path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "gt")
-        .ok_or_else(|| eyre::eyre!("Could not determine config directory"))?;
-    Ok(dirs.config_dir().join("config.toml"))
+    crate::config::config_file()
 }
 
 fn load_config() -> Result<toml::Value> {
@@ -159,7 +157,7 @@ mod tests {
     #[test]
     fn test_config_path() {
         let path = config_path().unwrap();
-        assert!(path.to_str().unwrap().contains("gt"));
+        assert!(path.to_str().unwrap().contains("gtx"));
         assert!(path.to_str().unwrap().ends_with("config.toml"));
     }
 }

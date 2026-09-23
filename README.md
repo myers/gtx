@@ -1,4 +1,4 @@
-# gt — Gitea CLI
+# gtx — Gitea CLI
 
 > **Early Alpha** — written by a coding agent, has not been used yet. YOU HAVE BEEN WARNED.
 
@@ -9,27 +9,31 @@ This attempts to be a faithful copy of `gh` for GitHub. Any places it differs sh
 ## Install
 
 ```bash
-cargo install --git https://github.com/myers/gt gt
+cargo install --git https://github.com/myers/gtx gtx
 ```
 
 ## Setup
 
 ```bash
-gt auth login --url https://your-instance --token YOUR_TOKEN
-gt auth setup-git
+gtx auth login --url https://your-instance --token YOUR_TOKEN
+gtx auth setup-git
 ```
 
-The first command saves your Gitea instance URL and API token. The second configures git to authenticate using `gt`, so clone/push/pull just work.
+The first command saves your Gitea instance URL and API token. The second configures git to authenticate using `gtx`, so clone/push/pull just work.
 
 You can generate a token at `https://your-instance/user/settings/applications`.
+
+## Configuration
+
+`gtx auth login` writes `~/.config/gtx/config.toml`; set `GTX_CONFIG` to use another file. `GITEA_URL`, `GITEA_TOKEN`, `GITEA_SERVER` (selects a `[servers.NAME]` profile) and `GITEA_REPO` override it. A config left in `~/.config/gt` from before the rename is copied across on first run.
 
 ## Usage
 
 ```
-$ gt --help
+$ gtx --help
 Gitea CLI
 
-Usage: gt [OPTIONS] <COMMAND>
+Usage: gtx [OPTIONS] <COMMAND>
 
 Commands:
   issue         Manage issues

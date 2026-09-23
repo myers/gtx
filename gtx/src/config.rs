@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
@@ -62,7 +62,7 @@ impl Config {
             .or(profile.url)
             .ok_or_else(|| {
                 eyre::eyre!(
-                    "No Gitea URL configured. Set GITEA_URL or add url to ~/.config/gt/config.toml"
+                    "No Gitea URL configured. Set GITEA_URL or add url to ~/.config/gtx/config.toml"
                 )
             })?;
 
@@ -71,7 +71,7 @@ impl Config {
             .or(profile.token)
             .ok_or_else(|| {
                 eyre::eyre!(
-                    "No Gitea token configured. Set GITEA_TOKEN or add token to ~/.config/gt/config.toml"
+                    "No Gitea token configured. Set GITEA_TOKEN or add token to ~/.config/gtx/config.toml"
                 )
             })?;
 
@@ -99,13 +99,40 @@ fn load_config_file() -> Option<ConfigFile> {
 }
 
 pub fn config_path() -> Option<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "gt")?;
-    let path = dirs.config_dir().join("config.toml");
+    let path = config_file().ok()?;
     if path.exists() {
         Some(path)
     } else {
         None
     }
+}
+
+/// Path of the config file: `GTX_CONFIG` if set, else `config.toml` in the
+/// platform config dir (`~/.config/gtx` on Linux). The file may not exist yet.
+pub fn config_file() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("GTX_CONFIG") {
+        return Ok(PathBuf::from(path));
+    }
+    let dirs = directories::ProjectDirs::from("", "", "gtx")
+        .ok_or_else(|| eyre::eyre!("Cannot determine config directory"))?;
+    if let Some(old) = directories::ProjectDirs::from("", "", "gt") {
+        migrate_config_dir(old.config_dir(), dirs.config_dir())?;
+    }
+    Ok(dirs.config_dir().join("config.toml"))
+}
+
+/// One-time migration from the CLI's old name: when `new` doesn't exist yet
+/// and `old` holds a config file, copy it across. `old` is left in place.
+fn migrate_config_dir(old: &Path, new: &Path) -> Result<()> {
+    let old_file = old.join("config.toml");
+    if new.exists() || !old_file.is_file() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(new)?;
+    std::fs::copy(&old_file, new.join("config.toml"))
+        .wrap_err_with(|| format!("Migrating {} to {}", old.display(), new.display()))?;
+    eprintln!("Migrated config from {} to {}", old.display(), new.display());
+    Ok(())
 }
 
 
@@ -118,11 +145,10 @@ pub fn load_aliases() -> HashMap<String, String> {
 
 /// Ensure config directory and file exist, returning the path.
 fn ensure_config_file() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "gt")
-        .ok_or_else(|| eyre::eyre!("Cannot determine config directory"))?;
-    let dir = dirs.config_dir();
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join("config.toml");
+    let path = config_file()?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     if !path.exists() {
         std::fs::write(&path, "")?;
     }
@@ -208,6 +234,47 @@ url = "https://gitea.example.com"
     fn test_parse_config_toml_invalid() {
         let result = parse_config_toml("not valid toml {{{{");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_migrate_config_dir_copies_old_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("gt");
+        let new = tmp.path().join("gtx");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("config.toml"), "[default]\nurl = \"u\"\n").unwrap();
+
+        migrate_config_dir(&old, &new).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(new.join("config.toml")).unwrap(),
+            "[default]\nurl = \"u\"\n"
+        );
+        assert!(old.join("config.toml").exists());
+    }
+
+    #[test]
+    fn test_migrate_config_dir_runs_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("gt");
+        let new = tmp.path().join("gtx");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("config.toml"), "old").unwrap();
+
+        migrate_config_dir(&old, &new).unwrap();
+
+        assert!(!new.join("config.toml").exists());
+    }
+
+    #[test]
+    fn test_migrate_config_dir_without_old_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let new = tmp.path().join("gtx");
+
+        migrate_config_dir(&tmp.path().join("gt"), &new).unwrap();
+
+        assert!(!new.exists());
     }
 
     #[test]

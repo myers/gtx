@@ -33,14 +33,14 @@ mod workflow;
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
-    env!("GT_GIT_SHA"),
+    env!("GTX_GIT_SHA"),
     ", built ",
-    env!("GT_BUILD_DATE"),
+    env!("GTX_BUILD_DATE"),
     ")",
 );
 
 #[derive(Parser)]
-#[command(name = "gt", about = "Gitea CLI", version = VERSION)]
+#[command(name = "gtx", about = "Gitea CLI", version = VERSION)]
 struct App {
     /// Print HTTP request/response transcripts on stderr. Repeat for more
     /// detail (`-vv` includes request/response bodies). Tokens are masked
@@ -114,13 +114,13 @@ enum Command {
 Install completions:
 
   # bash
-  gt completion bash > ~/.local/share/bash-completion/completions/gt
+  gtx completion bash > ~/.local/share/bash-completion/completions/gtx
 
   # zsh (add fpath=(~/.zfunc $fpath) to .zshrc first)
-  gt completion zsh > ~/.zfunc/_gt
+  gtx completion zsh > ~/.zfunc/_gt
 
   # fish
-  gt completion fish > ~/.config/fish/completions/gt.fish
+  gtx completion fish > ~/.config/fish/completions/gtx.fish
 ")]
 struct CompletionArgs {
     /// Shell to generate for (bash, zsh, fish, powershell, elvish)
@@ -142,7 +142,7 @@ async fn main() {
                 }
                 // Regular alias: expand and re-parse
                 let expanded = alias::expand_alias(expansion, &raw_args[2..]);
-                let mut full_args = vec!["gt".to_string()];
+                let mut full_args = vec!["gtx".to_string()];
                 full_args.extend(expanded);
                 let app = App::parse_from(full_args);
                 return run_app(app).await;
@@ -200,7 +200,7 @@ async fn run_app(app: App) -> eyre::Result<()> {
             clap_complete::generate(
                 args.shell,
                 &mut App::command(),
-                "gt",
+                "gtx",
                 &mut std::io::stdout(),
             );
             Ok(())
@@ -210,7 +210,7 @@ async fn run_app(app: App) -> eyre::Result<()> {
     if let Err(ref e) = result {
         let msg = e.to_string();
         if msg.starts_with("HTTP 401") {
-            eprintln!("hint: try `gt auth login`");
+            eprintln!("hint: try `gtx auth login`");
         } else if msg.starts_with("HTTP 403") {
             eprintln!("hint: you don't have permission for this operation");
         }

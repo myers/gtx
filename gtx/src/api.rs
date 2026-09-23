@@ -296,7 +296,7 @@ fn build_curl_command(
 fn auth_hint_for(status: u16, body: &str) -> Vec<String> {
     match status {
         401 => vec![
-            "token rejected by server. Run `gt auth login` to refresh.".to_string(),
+            "token rejected by server. Run `gtx auth login` to refresh.".to_string(),
         ],
         403 => {
             let message = serde_json::from_str::<serde_json::Value>(body)
@@ -306,7 +306,7 @@ fn auth_hint_for(status: u16, body: &str) -> Vec<String> {
             if let Some(scopes) = extract_required_scopes(&message) {
                 vec![
                     format!("token is missing required scope(s): {scopes}"),
-                    "re-run `gt auth login` with a token that includes those scopes,".to_string(),
+                    "re-run `gtx auth login` with a token that includes those scopes,".to_string(),
                     "      or use a different token (admin tokens cover read:admin).".to_string(),
                 ]
             } else {
@@ -423,7 +423,7 @@ mod tests {
     fn test_auth_hint_for_401() {
         let hints = auth_hint_for(401, r#"{"message":"unauthorized"}"#);
         assert_eq!(hints.len(), 1);
-        assert!(hints[0].contains("gt auth login"));
+        assert!(hints[0].contains("gtx auth login"));
     }
 
     #[test]

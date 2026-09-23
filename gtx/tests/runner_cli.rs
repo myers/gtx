@@ -3,7 +3,7 @@ use predicates::prelude::*;
 
 #[test]
 fn admin_and_org_are_mutually_exclusive() {
-    let mut cmd = Command::cargo_bin("gt").unwrap();
+    let mut cmd = Command::cargo_bin("gtx").unwrap();
     cmd.args(["runner", "list", "--admin", "--org", "acme"]);
     cmd.assert()
         .failure()

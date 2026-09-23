@@ -1,6 +1,6 @@
-# Local Gitea for `gt` smoke testing
+# Local Gitea for `gtx` smoke testing
 
-A docker-compose setup that runs `ghcr.io/myers/gitea` on `localhost:3333` so we can smoke-test `gt` without depending on a remote instance.
+A docker-compose setup that runs `ghcr.io/myers/gitea` on `localhost:3333` so we can smoke-test `gtx` without depending on a remote instance.
 
 ## Quick start
 
@@ -12,15 +12,15 @@ This will:
 
 1. Pull and start the Gitea container.
 2. Wait for it to come up.
-3. Create an admin user (`gt-admin` / `gt-admin-pw`).
+3. Create an admin user (`gtx-admin` / `gtx-admin-pw`).
 4. Mint an API token with `all` scopes.
-5. Write `gt-config.toml` here (gitignored) with `[default]` pointing at the local instance.
+5. Write `gtx-config.toml` here (gitignored) with `[default]` pointing at the local instance.
 
-To point `gt` at it for the current shell:
+To point `gtx` at it for the current shell:
 
 ```bash
-source <(grep -E '^(url|token)' gt-config.toml | sed 's/url *= */export GITEA_URL=/; s/token *= */export GITEA_TOKEN=/; s/"//g')
-cargo run -p gt -- repo list ${USER}
+source <(grep -E '^(url|token)' gtx-config.toml | sed 's/url *= */export GITEA_URL=/; s/token *= */export GITEA_TOKEN=/; s/"//g')
+cargo run -p gtx -- repo list ${USER}
 ```
 
 To stop and wipe:

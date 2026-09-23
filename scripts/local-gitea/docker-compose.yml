@@ -1,4 +1,4 @@
-name: gt-local-gitea
+name: gtx-local-gitea
 
 services:
   gitea:
@@ -6,7 +6,7 @@ services:
     # The myers/gitea fork only publishes linux/amd64 images.
     # Apple Silicon hosts run this under Rosetta 2 emulation.
     platform: linux/amd64
-    container_name: gt-local-gitea
+    container_name: gtx-local-gitea
     restart: unless-stopped
     environment:
       USER_UID: "1000"

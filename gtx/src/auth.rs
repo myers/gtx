@@ -17,7 +17,7 @@ enum AuthAction {
     Status(AuthStatusArgs),
     /// Log out (remove config file)
     Logout,
-    /// Configure git to use gt as credential helper
+    /// Configure git to use gtx as credential helper
     SetupGit(SetupGitArgs),
     /// Git credential helper (used by git, not invoked directly)
     GitCredential(GitCredentialArgs),
@@ -72,9 +72,7 @@ impl AuthCommand {
 }
 
 fn config_path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "gt")
-        .ok_or_else(|| eyre::eyre!("Could not determine config directory"))?;
-    Ok(dirs.config_dir().join("config.toml"))
+    crate::config::config_file()
 }
 
 fn login(args: &LoginArgs) -> Result<()> {
@@ -119,12 +117,12 @@ fn login(args: &LoginArgs) -> Result<()> {
 
     eprintln!("Logged in to {url}");
     eprintln!("Config saved to {}", path.display());
-    eprintln!("hint: run `gt auth setup-git` to configure git authentication");
+    eprintln!("hint: run `gtx auth setup-git` to configure git authentication");
     Ok(())
 }
 
 async fn status(args: &AuthStatusArgs) -> Result<()> {
-    // Resolve config the same way every other gt command does, so the
+    // Resolve config the same way every other gtx command does, so the
     // displayed url/token match what a probe would actually use. This means
     // env vars (GITEA_URL, GITEA_TOKEN) win over the file — and the user
     // sees that in the output.
@@ -177,7 +175,7 @@ async fn status(args: &AuthStatusArgs) -> Result<()> {
             match status {
                 Some(401) => {
                     eprintln!(
-                        "Token rejected by server. Run `gt auth login` to refresh."
+                        "Token rejected by server. Run `gtx auth login` to refresh."
                     );
                     eyre::bail!("token invalid (401)");
                 }
@@ -234,7 +232,7 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
         if !args.force {
             crate::config::Config::load().map_err(|_| {
                 eyre::eyre!(
-                    "Host is not authenticated. Use --force to set up anyway, or run `gt auth login` first."
+                    "Host is not authenticated. Use --force to set up anyway, or run `gtx auth login` first."
                 )
             })?;
         }
@@ -252,7 +250,7 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
 
     let gt_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "gt".to_string());
+        .unwrap_or_else(|_| "gtx".to_string());
 
     let helper_value = format!("!{gt_path} auth git-credential");
 

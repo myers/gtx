@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_find_local_refs_with_existing_file() {
-        // Cargo.toml exists in the gt crate root
+        // Cargo.toml exists in the gtx crate root
         let body = "See [config](Cargo.toml) for details";
         let refs = find_local_refs(body, Path::new(env!("CARGO_MANIFEST_DIR")));
         assert_eq!(refs.len(), 1);

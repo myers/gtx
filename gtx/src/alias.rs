@@ -24,7 +24,7 @@ struct SetArgs {
     /// Alias name
     name: String,
 
-    /// Expansion (gt command, or !shell command)
+    /// Expansion (gtx command, or !shell command)
     expansion: String,
 }
 

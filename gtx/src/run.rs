@@ -195,7 +195,7 @@ struct WatchArgs {
     compact: bool,
 
     /// Exit non-zero if the run's conclusion is a failure. By default,
-    /// `gt run watch` exits 0 once the run reaches a terminal state,
+    /// `gtx run watch` exits 0 once the run reaches a terminal state,
     /// regardless of conclusion (matches `gh run watch`).
     #[arg(long = "exit-status")]
     exit_status: bool,

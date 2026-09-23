@@ -197,7 +197,7 @@ impl Gitea {
         Ok(self.reqwest_client.execute(built).await?)
     }
 
-    /// Make a fully customizable request. Used by `gt api` for arbitrary endpoints
+    /// Make a fully customizable request. Used by `gtx api` for arbitrary endpoints
     /// with custom headers, methods, and bodies.
     pub async fn request(
         &self,
