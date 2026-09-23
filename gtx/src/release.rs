@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
 use crate::paginate;
 use crate::repo;
+use gitea_api::types::Release;
 
 #[derive(Args)]
 pub struct ReleaseCommand {
@@ -27,9 +28,9 @@ enum ReleaseAction {
     Download(DownloadArgs),
     /// Delete a release
     Delete(DeleteArgs),
-    /// Edit a release (title, body, draft, prerelease)
+    /// Edit a release
     Edit(EditReleaseArgs),
-    /// Upload an asset to a release
+    /// Upload assets to a release
     Upload(UploadArgs),
     /// Delete a release asset
     DeleteAsset(DeleteAssetArgs),
@@ -43,35 +44,52 @@ struct ListArgs {
 
 #[derive(Args)]
 struct CreateArgs {
-    /// Tag name (omit for interactive mode)
-    #[arg(short, long)]
+    /// Tag name (prompted for when omitted and running interactively)
     tag: Option<String>,
 
-    /// Release title (defaults to tag name)
-    #[arg(short, long)]
-    name: Option<String>,
+    /// Files to upload as release assets
+    files: Vec<String>,
 
-    /// Release body/notes
+    /// Release title (defaults to the tag name)
     #[arg(short, long)]
-    body: Option<String>,
+    title: Option<String>,
 
-    /// Mark as draft
-    #[arg(long)]
+    /// Release notes
+    #[arg(short, long, conflicts_with = "notes_file")]
+    notes: Option<String>,
+
+    /// Read release notes from file (use "-" to read from standard input)
+    #[arg(short = 'F', long, value_name = "FILE")]
+    notes_file: Option<String>,
+
+    /// Save the release as a draft instead of publishing it
+    #[arg(short, long)]
     draft: bool,
 
-    /// Mark as prerelease
-    #[arg(long)]
+    /// Mark the release as a prerelease
+    #[arg(short, long)]
     prerelease: bool,
+
+    /// Target branch or full commit SHA [default: the default branch]
+    #[arg(long, value_name = "BRANCH")]
+    target: Option<String>,
+
+    /// Abort in case the git tag doesn't already exist in the remote repository
+    #[arg(long)]
+    verify_tag: bool,
 }
 
 #[derive(Args)]
 struct ViewArgs {
-    /// Release ID
-    id: i64,
+    /// Release tag (the latest release when omitted)
+    tag: Option<String>,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
+
+    /// Open the release in the browser
+    #[arg(short, long)]
+    web: bool,
 }
 
 #[derive(Args)]
@@ -107,49 +125,82 @@ struct DownloadArgs {
 
 #[derive(Args)]
 struct DeleteArgs {
-    /// Release ID
-    id: i64,
+    /// Release tag
+    tag: String,
+
+    /// Skip the confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+
+    /// Delete the specified tag in addition to its release
+    #[arg(long)]
+    cleanup_tag: bool,
 }
 
 #[derive(Args)]
 struct EditReleaseArgs {
-    /// Release ID
-    id: i64,
+    /// Release tag
+    #[arg(value_name = "TAG")]
+    release: String,
 
-    /// New title
+    /// Release title
     #[arg(short, long)]
-    name: Option<String>,
+    title: Option<String>,
 
-    /// New body/notes
-    #[arg(short, long)]
-    body: Option<String>,
+    /// Release notes
+    #[arg(short, long, conflicts_with = "notes_file")]
+    notes: Option<String>,
 
-    /// Set draft status
-    #[arg(long)]
+    /// Read release notes from file (use "-" to read from standard input)
+    #[arg(short = 'F', long, value_name = "FILE")]
+    notes_file: Option<String>,
+
+    /// Save the release as a draft instead of publishing it (`--draft=false` publishes it)
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     draft: Option<bool>,
 
-    /// Set prerelease status
-    #[arg(long)]
+    /// Mark the release as a prerelease (`--prerelease=false` unmarks it)
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     prerelease: Option<bool>,
+
+    /// The name of the tag
+    #[arg(long = "tag", value_name = "STRING")]
+    new_tag: Option<String>,
+
+    /// Target branch or full commit SHA
+    #[arg(long, value_name = "BRANCH")]
+    target: Option<String>,
+
+    /// Abort in case the git tag doesn't already exist in the remote repository
+    #[arg(long)]
+    verify_tag: bool,
 }
 
 #[derive(Args)]
 struct UploadArgs {
-    /// Release ID
-    id: i64,
+    /// Release tag
+    tag: String,
 
     /// File(s) to upload
     #[arg(required = true)]
     files: Vec<String>,
+
+    /// Overwrite existing assets of the same name
+    #[arg(long)]
+    clobber: bool,
 }
 
 #[derive(Args)]
 struct DeleteAssetArgs {
-    /// Release ID
-    id: i64,
+    /// Release tag
+    tag: String,
 
-    /// Asset ID
-    asset_id: i64,
+    /// Asset name
+    asset_name: String,
+
+    /// Skip the confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 impl ReleaseCommand {
@@ -246,6 +297,163 @@ async fn list_releases(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()
     Ok(())
 }
 
+/// The release tagged `tag`, or the latest release when `tag` is `None`.
+///
+/// Gitea's by-tag endpoint can miss drafts, so, like gh, a 404 there falls
+/// back to searching the repository's draft releases for the tag.
+async fn fetch_release(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    tag: Option<&str>,
+) -> Result<Release> {
+    let Some(tag) = tag else {
+        return Ok(api
+            .repo_get_latest_release()
+            .owner(owner)
+            .repo(repo)
+            .send()
+            .await
+            .map_err(api_error)?
+            .into_inner());
+    };
+    match api
+        .repo_get_release_by_tag()
+        .owner(owner)
+        .repo(repo)
+        .tag(tag)
+        .send()
+        .await
+    {
+        Ok(rel) => return Ok(rel.into_inner()),
+        Err(e) => match gitea_api::GiteaError::from(e) {
+            gitea_api::GiteaError::Api { status: 404, .. } => {}
+            e => return Err(eyre::eyre!("{e}")),
+        },
+    }
+    const PER_PAGE: i64 = 50;
+    for page in 1.. {
+        let drafts = api
+            .repo_list_releases()
+            .owner(owner)
+            .repo(repo)
+            .draft(true)
+            .page(page)
+            .limit(PER_PAGE)
+            .send()
+            .await
+            .map_err(api_error)?
+            .into_inner();
+        let last = (drafts.len() as i64) < PER_PAGE;
+        if let Some(rel) = drafts
+            .into_iter()
+            .find(|r| r.tag_name.as_deref() == Some(tag))
+        {
+            return Ok(rel);
+        }
+        if last {
+            break;
+        }
+    }
+    eyre::bail!("release not found")
+}
+
+fn api_error(e: impl Into<gitea_api::GiteaError>) -> eyre::Report {
+    eyre::eyre!("{}", e.into())
+}
+
+/// Whether we can ask the user questions (stdin and stdout are terminals), as gh's `CanPrompt`.
+fn can_prompt() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin()) && atty_check()
+}
+
+/// Release notes from `--notes`, or `--notes-file` ("-" for stdin).
+fn read_notes(notes: &Option<String>, notes_file: &Option<String>) -> Result<Option<String>> {
+    Ok(match (notes, notes_file.as_deref()) {
+        (Some(notes), _) => Some(notes.clone()),
+        (None, Some("-")) => Some(std::io::read_to_string(std::io::stdin())?),
+        (None, Some(path)) => {
+            Some(std::fs::read_to_string(path).map_err(|e| eyre::eyre!("{path}: {e}"))?)
+        }
+        (None, None) => None,
+    })
+}
+
+/// `--verify-tag`: fail unless git tag `tag` exists on the server.
+async fn verify_tag(api: &gitea_api::Gitea, owner: &str, repo: &str, tag: &str) -> Result<()> {
+    match api
+        .repo_get_tag()
+        .owner(owner)
+        .repo(repo)
+        .tag(tag)
+        .send()
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) => match gitea_api::GiteaError::from(e) {
+            gitea_api::GiteaError::Api { status: 404, .. } => eyre::bail!(
+                "tag {tag} doesn't exist in the repo {owner}/{repo}, aborting due to --verify-tag flag"
+            ),
+            e => Err(eyre::eyre!("{e}")),
+        },
+    }
+}
+
+/// Fail on the first of `files` that isn't a readable regular file.
+fn check_files(files: &[String]) -> Result<()> {
+    match files.iter().find(|f| !std::path::Path::new(f).is_file()) {
+        Some(f) => eyre::bail!("File not found: {f}"),
+        None => Ok(()),
+    }
+}
+
+fn file_name(path: &str) -> Result<String> {
+    Ok(std::path::Path::new(path)
+        .file_name()
+        .ok_or_else(|| eyre::eyre!("Invalid filename: {path}"))?
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Upload the file at `path` as an asset of release `release_id`.
+async fn upload_asset(
+    api: &gitea_api::Gitea,
+    config: &Config,
+    owner: &str,
+    repo: &str,
+    release_id: i64,
+    path: &str,
+) -> Result<()> {
+    let name = file_name(path)?;
+    let mut url = url::Url::parse(&api.url_for(&format!(
+        "repos/{owner}/{repo}/releases/{release_id}/assets"
+    )))?;
+    url.query_pairs_mut().append_pair("name", &name);
+
+    let part = reqwest::multipart::Part::bytes(std::fs::read(path)?).file_name(name);
+    let form = reqwest::multipart::Form::new().part("attachment", part);
+    let resp = reqwest::Client::new()
+        .post(url)
+        .header("Authorization", format!("token {}", config.token))
+        .multipart(form)
+        .send()
+        .await?;
+    gitea_api::error_for_status(resp)
+        .await
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    Ok(())
+}
+
+fn confirm(question: &str) -> Result<()> {
+    if !inquire::Confirm::new(question)
+        .with_default(false)
+        .prompt()?
+    {
+        eyre::bail!("Cancelled");
+    }
+    Ok(())
+}
+
 async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
@@ -253,69 +461,128 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let (tag, name, body_text, draft, prerelease) = if let Some(ref tag) = args.tag {
-        let name = args.name.clone().unwrap_or_else(|| tag.clone());
-        (tag.clone(), name, args.body.clone(), args.draft, args.prerelease)
-    } else {
-        if !atty_check() {
-            eyre::bail!("provide --tag when not running interactively");
+    check_files(&args.files)?;
+    let notes = read_notes(&args.notes, &args.notes_file)?;
+    let new = match &args.tag {
+        Some(tag) => NewRelease {
+            tag: tag.clone(),
+            title: args.title.clone().unwrap_or_else(|| tag.clone()),
+            notes,
+            draft: args.draft,
+            prerelease: args.prerelease,
+        },
+        None => {
+            if !can_prompt() {
+                eyre::bail!("tag required when not running interactively");
+            }
+            interactive_create_release(args, notes)?
         }
-        interactive_create_release()?
     };
 
-    let release = api
+    if args.verify_tag {
+        verify_tag(&api, owner, repo, &new.tag).await?;
+    }
+
+    // Like gh: attach the files to a draft, then publish it once they're all there.
+    let publish_after_upload = !args.files.is_empty() && !new.draft;
+    let rel = api
         .repo_create_release()
         .owner(owner)
         .repo(repo)
         .body_map(|mut b| {
             b = b
-                .tag_name(tag.clone())
-                .name(name.clone())
-                .draft(draft)
-                .prerelease(prerelease);
-            if let Some(ref body) = body_text {
-                b = b.body(body.clone());
+                .tag_name(new.tag.clone())
+                .name(new.title.clone())
+                .draft(new.draft || publish_after_upload)
+                .prerelease(new.prerelease);
+            if let Some(notes) = &new.notes {
+                b = b.body(notes.clone());
+            }
+            if let Some(target) = &args.target {
+                b = b.target_commitish(target.clone());
             }
             b
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+        .map_err(api_error)?
         .into_inner();
+    let id = rel
+        .id
+        .ok_or_else(|| eyre::eyre!("server returned a release without an id"))?;
 
-    let id = release.id.unwrap_or(0);
-    let url = release.html_url.as_deref().unwrap_or("");
-    eprintln!("Created release #{id}: {url}");
+    for file in &args.files {
+        upload_asset(&api, &config, owner, repo, id, file).await?;
+    }
+
+    let rel = if publish_after_upload {
+        api.repo_edit_release()
+            .owner(owner)
+            .repo(repo)
+            .id(id)
+            .body_map(|b| b.draft(false))
+            .send()
+            .await
+            .map_err(api_error)?
+            .into_inner()
+    } else {
+        rel
+    };
+
+    println!("{}", rel.html_url.as_deref().unwrap_or(""));
     Ok(())
 }
 
-fn interactive_create_release() -> Result<(String, String, Option<String>, bool, bool)> {
+/// What `release create` sends, from flags or prompts.
+struct NewRelease {
+    tag: String,
+    title: String,
+    notes: Option<String>,
+    draft: bool,
+    prerelease: bool,
+}
+
+fn interactive_create_release(args: &CreateArgs, notes: Option<String>) -> Result<NewRelease> {
     let tag = inquire::Text::new("Tag name:")
         .with_validator(|s: &str| {
             if s.trim().is_empty() {
-                Ok(inquire::validator::Validation::Invalid("Tag is required".into()))
+                Ok(inquire::validator::Validation::Invalid(
+                    "Tag is required".into(),
+                ))
             } else {
                 Ok(inquire::validator::Validation::Valid)
             }
         })
         .prompt()?;
 
-    let name = inquire::Text::new("Release title:")
-        .with_default(&tag)
-        .prompt()?;
+    let title = match &args.title {
+        Some(title) => title.clone(),
+        None => inquire::Text::new("Title:").with_default(&tag).prompt()?,
+    };
 
-    let body = crate::prompt::edit_body("")?;
-    let body_opt = if body.is_empty() { None } else { Some(body) };
+    let notes = match notes {
+        Some(notes) => Some(notes),
+        None => Some(crate::prompt::edit_body("")?).filter(|n| !n.is_empty()),
+    };
 
-    let draft = inquire::Confirm::new("Draft?").with_default(false).prompt()?;
-    let prerelease = inquire::Confirm::new("Prerelease?").with_default(false).prompt()?;
+    let prerelease = args.prerelease
+        || inquire::Confirm::new("Is this a prerelease?")
+            .with_default(false)
+            .prompt()?;
 
-    let action = inquire::Select::new("What's next?", vec!["Submit", "Cancel"]).prompt()?;
-    if action == "Cancel" {
-        eyre::bail!("Cancelled");
-    }
+    let options = vec!["Publish release", "Save as draft", "Cancel"];
+    let draft = match inquire::Select::new("Submit?", options).prompt()? {
+        "Cancel" => eyre::bail!("Cancelled"),
+        choice => args.draft || choice == "Save as draft",
+    };
 
-    Ok((tag, name, body_opt, draft, prerelease))
+    Ok(NewRelease {
+        tag,
+        title,
+        notes,
+        draft,
+        prerelease,
+    })
 }
 
 async fn view_release(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
@@ -325,70 +592,102 @@ async fn view_release(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()>
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let rel = api
-        .repo_get_release()
-        .owner(owner)
-        .repo(repo)
-        .id(args.id)
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-        .into_inner();
+    let rel = fetch_release(&api, owner, repo, args.tag.as_deref()).await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&rel)?);
-        return Ok(());
+    if args.web {
+        let url = rel.html_url.as_deref().unwrap_or("");
+        if atty_check() {
+            eprintln!("Opening {url} in your browser.");
+        }
+        return crate::browse::open_url(url);
     }
 
+    if args.json.is_json() {
+        return crate::json::write_json_one(&args.json, &rel, RELEASE_FIELDS);
+    }
+
+    if atty_check() {
+        print_release_tty(&rel);
+    } else {
+        print_release_plain(&rel);
+    }
+    Ok(())
+}
+
+/// gh's machine-readable `release view` output.
+fn print_release_plain(rel: &Release) {
+    let draft = rel.draft.unwrap_or(false);
+    println!("title:\t{}", rel.name.as_deref().unwrap_or(""));
+    println!("tag:\t{}", rel.tag_name.as_deref().unwrap_or(""));
+    println!("draft:\t{draft}");
+    println!("prerelease:\t{}", rel.prerelease.unwrap_or(false));
+    let author = rel.author.as_ref().and_then(|a| a.login.as_deref());
+    println!("author:\t{}", author.unwrap_or(""));
+    if let Some(created) = rel.created_at {
+        println!(
+            "created:\t{}",
+            created.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+    }
+    if let (false, Some(published)) = (draft, rel.published_at) {
+        println!(
+            "published:\t{}",
+            published.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+    }
+    println!("url:\t{}", rel.html_url.as_deref().unwrap_or(""));
+    for asset in &rel.assets {
+        println!("asset:\t{}", asset.name.as_deref().unwrap_or(""));
+    }
+    println!("--");
+    let body = rel.body.as_deref().unwrap_or("");
+    print!("{body}");
+    if !body.ends_with('\n') {
+        println!();
+    }
+}
+
+fn print_release_tty(rel: &Release) {
     let name = rel.name.as_deref().unwrap_or("(no title)");
     let tag = rel.tag_name.as_deref().unwrap_or("");
-    let id = rel.id.unwrap_or(0);
 
     let status = if rel.draft.unwrap_or(false) {
-        "draft"
+        " (Draft)"
     } else if rel.prerelease.unwrap_or(false) {
-        "prerelease"
+        " (Pre-release)"
     } else {
-        "release"
+        ""
     };
+    println!("{name}{status}");
+    println!("Tag: {tag}");
 
-    println!("{name} (#{id})");
-    println!("Tag: {tag} -- {status}");
-
-    if let Some(ref author) = rel.author {
-        let login = author.login.as_deref().unwrap_or("unknown");
-        println!("Author: {login}");
-    }
-
-    if let Some(published) = rel.published_at {
-        println!("Published: {}", relative_time(published));
-    }
-
-    // Body
-    if let Some(ref body) = rel.body {
-        if !body.is_empty() {
-            println!();
-            println!("{body}");
+    let author = rel.author.as_ref().and_then(|a| a.login.as_deref());
+    match (author, rel.published_at) {
+        (Some(login), Some(published)) => {
+            println!("{login} released this {}", relative_time(published))
         }
+        (Some(login), None) => println!("{login} created this"),
+        _ => {}
     }
 
-    // Assets
+    if let Some(body) = rel.body.as_deref().filter(|b| !b.is_empty()) {
+        println!();
+        println!("{body}");
+    }
+
     if !rel.assets.is_empty() {
-        println!("\nAssets:");
+        println!("\nAssets");
         for asset in &rel.assets {
             let name = asset.name.as_deref().unwrap_or("unnamed");
-            let downloads = asset.download_count.unwrap_or(0);
-            println!("  {name} ({downloads} downloads)");
+            let size = asset.size.unwrap_or(0);
+            println!("  {name}  {size} bytes");
         }
     }
 
-    // URL
-    if let Some(ref url) = rel.html_url {
+    if let Some(url) = &rel.html_url {
         println!();
-        println!("{url}");
+        println!("View on Gitea: {url}");
     }
-
-    Ok(())
 }
 
 /// What `release download` fetches: a named asset, or the source archive
@@ -405,25 +704,7 @@ async fn download_release(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Re
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let rel = match &args.tag {
-        Some(tag) => api
-            .repo_get_release_by_tag()
-            .owner(owner)
-            .repo(repo)
-            .tag(tag)
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-            .into_inner(),
-        None => api
-            .repo_get_latest_release()
-            .owner(owner)
-            .repo(repo)
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-            .into_inner(),
-    };
+    let rel = fetch_release(&api, owner, repo, args.tag.as_deref()).await?;
     let tag = rel.tag_name.as_deref().unwrap_or("");
 
     let downloads = if let Some(format) = &args.archive {
@@ -571,15 +852,53 @@ async fn delete_release(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Result
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
+    let rel = fetch_release(&api, owner, repo, Some(&args.tag)).await?;
+    let id = rel
+        .id
+        .ok_or_else(|| eyre::eyre!("release {} has no id", args.tag))?;
+    let draft = rel.draft.unwrap_or(false);
+
+    if !args.yes && can_prompt() {
+        confirm(&format!("Delete release {} in {owner}/{repo}?", args.tag))?;
+    }
+
     api.repo_delete_release()
         .owner(owner)
         .repo(repo)
-        .id(args.id)
+        .id(id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+        .map_err(api_error)?;
 
-    eprintln!("Release #{} deleted", args.id);
+    if args.cleanup_tag {
+        let deleted = api
+            .repo_delete_tag()
+            .owner(owner)
+            .repo(repo)
+            .tag(&args.tag)
+            .send()
+            .await;
+        match deleted.map_err(gitea_api::GiteaError::from) {
+            Ok(_) => {}
+            // A draft's tag need not exist yet.
+            Err(gitea_api::GiteaError::Api { status: 404, .. }) if draft => {}
+            Err(e) => eyre::bail!("{e}"),
+        }
+    }
+
+    if atty_check() {
+        if args.cleanup_tag {
+            eprintln!("✓ Deleted release and tag {}", args.tag);
+        } else {
+            eprintln!("✓ Deleted release {}", args.tag);
+            if !draft {
+                eprintln!(
+                    "! Note that the {} git tag still remains in the repository",
+                    args.tag
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -590,16 +909,28 @@ async fn edit_release(repo_args: &repo::RepoArgs, args: &EditReleaseArgs) -> Res
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    api.repo_edit_release()
+    let notes = read_notes(&args.notes, &args.notes_file)?;
+    let rel = fetch_release(&api, owner, repo, Some(&args.release)).await?;
+    let id = rel
+        .id
+        .ok_or_else(|| eyre::eyre!("release {} has no id", args.release))?;
+
+    if args.verify_tag {
+        let tag = args.new_tag.as_deref().unwrap_or(&args.release);
+        verify_tag(&api, owner, repo, tag).await?;
+    }
+
+    let rel = api
+        .repo_edit_release()
         .owner(owner)
         .repo(repo)
-        .id(args.id)
+        .id(id)
         .body_map(|mut b| {
-            if let Some(ref name) = args.name {
-                b = b.name(name.clone());
+            if let Some(title) = &args.title {
+                b = b.name(title.clone());
             }
-            if let Some(ref body) = args.body {
-                b = b.body(body.clone());
+            if let Some(notes) = &notes {
+                b = b.body(notes.clone());
             }
             if let Some(draft) = args.draft {
                 b = b.draft(draft);
@@ -607,13 +938,20 @@ async fn edit_release(repo_args: &repo::RepoArgs, args: &EditReleaseArgs) -> Res
             if let Some(prerelease) = args.prerelease {
                 b = b.prerelease(prerelease);
             }
+            if let Some(tag) = &args.new_tag {
+                b = b.tag_name(tag.clone());
+            }
+            if let Some(target) = &args.target {
+                b = b.target_commitish(target.clone());
+            }
             b
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+        .map_err(api_error)?
+        .into_inner();
 
-    eprintln!("Updated release #{}", args.id);
+    println!("{}", rel.html_url.as_deref().unwrap_or(""));
     Ok(())
 }
 
@@ -624,46 +962,53 @@ async fn upload_assets(repo_args: &repo::RepoArgs, args: &UploadArgs) -> Result<
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    for file_path in &args.files {
-        let path = std::path::Path::new(file_path);
-        if !path.exists() {
-            eyre::bail!("File not found: {file_path}");
+    check_files(&args.files)?;
+    let rel = fetch_release(&api, owner, repo, Some(&args.tag)).await?;
+    let id = rel
+        .id
+        .ok_or_else(|| eyre::eyre!("release {} has no id", args.tag))?;
+
+    // Assets each file would replace, by index into `args.files`.
+    let mut existing = Vec::new();
+    for file in &args.files {
+        let name = file_name(file)?;
+        let asset = rel
+            .assets
+            .iter()
+            .find(|a| a.name.as_deref() == Some(name.as_str()));
+        existing.push(asset.map(|a| (name, a.id)));
+    }
+    if !args.clobber {
+        let dupes: Vec<&str> = existing.iter().flatten().map(|(n, _)| n.as_str()).collect();
+        if !dupes.is_empty() {
+            eyre::bail!(
+                "asset under the same name already exists: [{}]",
+                dupes.join(" ")
+            );
         }
-
-        let filename = path
-            .file_name()
-            .ok_or_else(|| eyre::eyre!("Invalid filename: {file_path}"))?
-            .to_string_lossy()
-            .to_string();
-
-        let file_bytes = std::fs::read(path)?;
-
-        // Gitea expects multipart form upload — use raw reqwest
-        let url = api.url_for(&format!(
-            "repos/{owner}/{repo}/releases/{}/assets?name={filename}",
-            args.id
-        ));
-
-        let part = reqwest::multipart::Part::bytes(file_bytes).file_name(filename.clone());
-        let form = reqwest::multipart::Form::new().part("attachment", part);
-
-        let resp = reqwest::Client::new()
-            .post(&url)
-            .header(
-                "Authorization",
-                format!("token {}", config.token),
-            )
-            .multipart(form)
-            .send()
-            .await?;
-
-        gitea_api::error_for_status(resp)
-            .await
-            .map_err(|e| eyre::eyre!("{e}"))?;
-
-        eprintln!("Uploaded {filename} to release #{}", args.id);
     }
 
+    for (file, existing) in args.files.iter().zip(existing) {
+        if let Some((_, Some(asset_id))) = existing {
+            api.repo_delete_release_attachment()
+                .owner(owner)
+                .repo(repo)
+                .id(id)
+                .attachment_id(asset_id)
+                .send()
+                .await
+                .map_err(api_error)?;
+        }
+        upload_asset(&api, &config, owner, repo, id, file).await?;
+    }
+
+    if atty_check() {
+        eprintln!(
+            "Successfully uploaded {} assets to {}",
+            args.files.len(),
+            args.tag
+        );
+    }
     Ok(())
 }
 
@@ -674,15 +1019,44 @@ async fn delete_asset(repo_args: &repo::RepoArgs, args: &DeleteAssetArgs) -> Res
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
+    let rel = fetch_release(&api, owner, repo, Some(&args.tag)).await?;
+    let id = rel
+        .id
+        .ok_or_else(|| eyre::eyre!("release {} has no id", args.tag))?;
+    let asset_id = rel
+        .assets
+        .iter()
+        .find(|a| a.name.as_deref() == Some(args.asset_name.as_str()))
+        .and_then(|a| a.id)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "asset {} not found in release {}",
+                args.asset_name,
+                args.tag
+            )
+        })?;
+
+    if !args.yes && can_prompt() {
+        confirm(&format!(
+            "Delete asset {} in release {} in {owner}/{repo}?",
+            args.asset_name, args.tag
+        ))?;
+    }
+
     api.repo_delete_release_attachment()
         .owner(owner)
         .repo(repo)
-        .id(args.id)
-        .attachment_id(args.asset_id)
+        .id(id)
+        .attachment_id(asset_id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+        .map_err(api_error)?;
 
-    eprintln!("Deleted asset #{} from release #{}", args.asset_id, args.id);
+    if atty_check() {
+        eprintln!(
+            "✓ Deleted asset {} from release {}",
+            args.asset_name, args.tag
+        );
+    }
     Ok(())
 }

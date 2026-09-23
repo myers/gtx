@@ -43,7 +43,7 @@ impl BrowseCommand {
     }
 }
 
-fn open_url(url: &str) -> Result<()> {
+pub(crate) fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open").arg(url).status()?;

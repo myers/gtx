@@ -48,6 +48,7 @@ pub struct FakeGitea {
     pub url: String,
     seen: Arc<Mutex<Vec<String>>>,
     auth: Arc<Mutex<Vec<Option<String>>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeGitea {
@@ -71,6 +72,8 @@ impl FakeGitea {
         let seen_thread = Arc::clone(&seen);
         let auth = Arc::new(Mutex::new(Vec::new()));
         let auth_thread = Arc::clone(&auth);
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let bodies_thread = Arc::clone(&bodies);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -109,6 +112,10 @@ impl FakeGitea {
                     .unwrap()
                     .push(format!("{method} {target}"));
                 auth_thread.lock().unwrap().push(authorization);
+                bodies_thread
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&req_body).into_owned());
                 let mut head = if reply.status == 204 {
                     "HTTP/1.1 204 No Content\r\n".to_string()
                 } else {
@@ -128,7 +135,12 @@ impl FakeGitea {
                 }
             }
         });
-        FakeGitea { url, seen, auth }
+        FakeGitea {
+            url,
+            seen,
+            auth,
+            bodies,
+        }
     }
 
     pub fn gtx(&self) -> Command {
@@ -148,5 +160,10 @@ impl FakeGitea {
     /// `Authorization` header of each request, parallel to [`Self::seen`].
     pub fn auth(&self) -> Vec<Option<String>> {
         self.auth.lock().unwrap().clone()
+    }
+
+    /// Request body of each request (lossy UTF-8), parallel to [`Self::seen`].
+    pub fn bodies(&self) -> Vec<String> {
+        self.bodies.lock().unwrap().clone()
     }
 }

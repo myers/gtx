@@ -33,11 +33,28 @@ pub fn write_json<T: Serialize>(
     items: &[T],
     available_fields: &[&str],
 ) -> Result<()> {
+    write_json_value(args, serde_json::to_value(items)?, available_fields)
+}
+
+/// Like [`write_json`], for a single object (e.g. a `view` command).
+pub fn write_json_one<T: Serialize>(
+    args: &JsonArgs,
+    item: &T,
+    available_fields: &[&str],
+) -> Result<()> {
+    write_json_value(args, serde_json::to_value(item)?, available_fields)
+}
+
+fn write_json_value(
+    args: &JsonArgs,
+    full: serde_json::Value,
+    available_fields: &[&str],
+) -> Result<()> {
     let fields = match &args.json {
         Some(f) if !f.is_empty() => f,
         _ => {
             // Bare --json with no fields: dump full objects
-            return write_and_filter(args, &serde_json::to_value(items)?);
+            return write_and_filter(args, &full);
         }
     };
 
@@ -60,34 +77,22 @@ pub fn write_json<T: Serialize>(
         }
     }
 
-    // Serialize and filter to requested fields
-    let full = serde_json::to_value(items)?;
     let filtered = filter_fields(&full, fields);
     write_and_filter(args, &filtered)
 }
 
-/// Filter a JSON array to only include specified fields on each object.
+/// Keep only `fields` of an object, or of each object in an array.
 fn filter_fields(value: &serde_json::Value, fields: &[String]) -> serde_json::Value {
     match value {
         serde_json::Value::Array(arr) => {
-            let filtered: Vec<serde_json::Value> = arr
-                .iter()
-                .map(|item| {
-                    if let serde_json::Value::Object(obj) = item {
-                        let mut filtered_obj = serde_json::Map::new();
-                        for field in fields {
-                            if let Some(v) = obj.get(field.as_str()) {
-                                filtered_obj.insert(field.clone(), v.clone());
-                            }
-                        }
-                        serde_json::Value::Object(filtered_obj)
-                    } else {
-                        item.clone()
-                    }
-                })
-                .collect();
-            serde_json::Value::Array(filtered)
+            serde_json::Value::Array(arr.iter().map(|item| filter_fields(item, fields)).collect())
         }
+        serde_json::Value::Object(obj) => serde_json::Value::Object(
+            fields
+                .iter()
+                .filter_map(|f| Some((f.clone(), obj.get(f.as_str())?.clone())))
+                .collect(),
+        ),
         _ => value.clone(),
     }
 }
