@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 
 use common::{FakeGitea, Reply};
 use predicates::str::contains;
+use predicates::prelude::PredicateBooleanExt;
 
 /// A fresh, empty scratch directory unique to this test.
 fn scratch(name: &str) -> PathBuf {
@@ -368,7 +369,9 @@ fn tag_server() -> FakeGitea {
                         (200, "[]".into())
                     }
                 }
-                ("GET", "/api/v1/repos/o/r/tags/v1") => (200, r#"{"name":"v1"}"#.into()),
+                ("GET", "/api/v1/repos/o/r/tags/v1") => {
+                    (200, r#"{"name":"v1","message":"Tag message\n"}"#.into())
+                }
                 ("POST", "/api/v1/repos/o/r/releases") => (201, v1),
                 ("PATCH", "/api/v1/repos/o/r/releases/4" | "/api/v1/repos/o/r/releases/7") => {
                     (200, v1)
@@ -786,4 +789,259 @@ fn release_delete_asset_by_tag_and_name() {
         .failure()
         .stderr(contains("asset zzz not found in release v1"));
     assert_eq!(server.seen().len(), 1);
+}
+
+/// Four releases, newest first as Gitea lists them: draft v4 (no title),
+/// prerelease v3, v2 (the latest), v1. Honors `limit`/`page`.
+fn list_server(latest: bool) -> FakeGitea {
+    FakeGitea::start_with(move |_, target| {
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let param = |name: &str| {
+            query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+                .and_then(|v| v.parse::<usize>().ok())
+        };
+        let rel = |id: u32, tag: &str, name: &str, draft: bool, pre: bool, day: u32| {
+            format!(
+                r#"{{"id":{id},"tag_name":"{tag}","name":"{name}","draft":{draft},"prerelease":{pre},"created_at":"2026-01-0{day}T00:00:00Z","published_at":"2026-01-0{day}T12:00:00Z"}}"#
+            )
+        };
+        let all = [
+            rel(4, "v4", "", true, false, 4),
+            rel(3, "v3", "Pre 3", false, true, 3),
+            rel(2, "v2", "  Two   words ", false, false, 2),
+            rel(1, "v1", "One", false, false, 1),
+        ];
+        match path {
+            "/api/v1/repos/o/r/releases" => {
+                let limit = param("limit").unwrap_or(30);
+                let page = param("page").unwrap_or(1);
+                let rows: Vec<&String> = all.iter().skip((page - 1) * limit).take(limit).collect();
+                (200, format!("[{}]", rows.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")))
+            }
+            "/api/v1/repos/o/r/releases/latest" if latest => (200, all[2].clone()),
+            _ => (404, r#"{"message":"not found"}"#.into()),
+        }
+    })
+}
+
+/// Non-TTY output is gh's: tab-separated TITLE, TYPE, TAG NAME, PUBLISHED
+/// (RFC 3339), with `Latest` only on the release Gitea reports as latest.
+#[test]
+fn release_list_prints_gh_columns() {
+    let server = list_server(true);
+    server
+        .gtx()
+        .args(["release", "list", "-R", "o/r"])
+        .assert()
+        .success()
+        .stdout(
+            "v4\tDraft\tv4\t2026-01-04T12:00:00Z\n\
+             Pre 3\tPre-release\tv3\t2026-01-03T12:00:00Z\n\
+             Two words\tLatest\tv2\t2026-01-02T12:00:00Z\n\
+             One\t\tv1\t2026-01-01T12:00:00Z\n",
+        );
+    let seen = server.seen();
+    assert!(seen[0].contains("limit=30"), "{seen:?}");
+    assert!(seen.contains(&"GET /api/v1/repos/o/r/releases/latest".to_string()));
+}
+
+#[test]
+fn release_list_without_latest_release_marks_none() {
+    let server = list_server(false);
+    server
+        .gtx()
+        .args(["release", "list", "-R", "o/r"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Latest").not());
+}
+
+#[test]
+fn release_list_limit_and_order() {
+    let server = list_server(true);
+    server
+        .gtx()
+        .args(["release", "list", "-R", "o/r", "-L", "2"])
+        .assert()
+        .success()
+        .stdout(predicates::str::is_match("^v4\t[^\n]*\nPre 3\t[^\n]*\n$").unwrap());
+    assert!(server.seen()[0].contains("limit=2"), "{:?}", server.seen());
+
+    // Oldest first: Gitea lists newest first, so fetch them all and reverse.
+    let server = list_server(true);
+    server
+        .gtx()
+        .args(["release", "list", "-R", "o/r", "-L", "2", "--order", "asc"])
+        .assert()
+        .success()
+        .stdout(predicates::str::is_match("^One\t[^\n]*\nTwo words\t[^\n]*\n$").unwrap());
+
+    server
+        .gtx()
+        .args(["release", "list", "-R", "o/r", "-O", "sideways"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn release_list_excludes_drafts_and_prereleases_server_side() {
+    let server = list_server(true);
+    server
+        .gtx()
+        .args([
+            "release",
+            "list",
+            "-R",
+            "o/r",
+            "--exclude-drafts",
+            "--exclude-pre-releases",
+        ])
+        .assert()
+        .success();
+    let first = &server.seen()[0];
+    assert!(first.contains("draft=false"), "{first}");
+    assert!(first.contains("pre-release=false"), "{first}");
+}
+
+#[test]
+fn release_list_empty_is_quiet_success_when_piped() {
+    let server = FakeGitea::start(|_| "[]".into());
+    server
+        .gtx()
+        .args(["release", "list", "-R", "o/r"])
+        .assert()
+        .success()
+        .stdout("")
+        .stderr("");
+}
+
+#[test]
+fn release_create_notes_from_tag_uses_tag_message() {
+    let server = tag_server();
+    server
+        .gtx()
+        .args(["release", "create", "-R", "o/r", "v1", "--notes-from-tag"])
+        .assert()
+        .success();
+    assert_eq!(
+        sent_json(&server, "POST /api/v1/repos/o/r/releases")["body"],
+        "Tag message\n"
+    );
+
+    // Like gh, --notes is prepended.
+    let server = tag_server();
+    server
+        .gtx()
+        .args([
+            "release", "create", "-R", "o/r", "v1", "--notes-from-tag", "-n", "Intro",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        sent_json(&server, "POST /api/v1/repos/o/r/releases")["body"],
+        "Intro\nTag message\n"
+    );
+}
+
+#[test]
+fn release_create_notes_from_tag_needs_existing_tag() {
+    let server = tag_server();
+    server
+        .gtx()
+        .args(["release", "create", "-R", "o/r", "v9", "--notes-from-tag"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "cannot generate release notes from tag v9 as it does not exist in the repo o/r",
+        ));
+    assert_eq!(server.seen(), ["GET /api/v1/repos/o/r/tags/v9"]);
+}
+
+#[test]
+fn release_create_rejects_generate_notes() {
+    for args in [
+        &["--generate-notes"][..],
+        &["--notes-start-tag", "v0"][..],
+    ] {
+        let server = tag_server();
+        server
+            .gtx()
+            .args(["release", "create", "-R", "o/r", "v1"])
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(contains("Gitea has no API for generating release notes"));
+        assert!(server.seen().is_empty());
+    }
+
+    let server = tag_server();
+    server
+        .gtx()
+        .args([
+            "release", "create", "-R", "o/r", "v1", "--notes-from-tag", "--generate-notes",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("cannot be used with"));
+}
+
+/// Gitea has no "make latest": the newest published non-prerelease release is
+/// latest. `--latest` checks that holds; `--latest=false` is only satisfiable
+/// for drafts and prereleases.
+#[test]
+fn release_create_latest() {
+    let server = tag_server();
+    server
+        .gtx()
+        .args(["release", "create", "-R", "o/r", "v1", "--latest"])
+        .assert()
+        .success();
+    assert_eq!(
+        server.seen(),
+        [
+            "POST /api/v1/repos/o/r/releases",
+            "GET /api/v1/repos/o/r/releases/latest"
+        ]
+    );
+
+    // The server's latest is some other release.
+    let server = FakeGitea::start_with(|method, target| match (method, target) {
+        ("POST", "/api/v1/repos/o/r/releases") => {
+            (201, r#"{"id":5,"tag_name":"v0","html_url":"u"}"#.into())
+        }
+        ("GET", "/api/v1/repos/o/r/releases/latest") => {
+            (200, r#"{"id":4,"tag_name":"v1"}"#.into())
+        }
+        _ => (404, "{}".into()),
+    });
+    server
+        .gtx()
+        .args(["release", "create", "-R", "o/r", "v0", "--latest"])
+        .assert()
+        .failure()
+        .stdout("u\n")
+        .stderr(contains("Gitea's latest release is v1, not v0"));
+
+    for (args, ok) in [
+        (&["--latest=false"][..], false),
+        (&["--latest=false", "-p"][..], true),
+        (&["--latest=false", "-d"][..], true),
+        (&["--latest", "-p"][..], false),
+        (&["--latest", "-d"][..], false),
+    ] {
+        let server = tag_server();
+        let assert = server
+            .gtx()
+            .args(["release", "create", "-R", "o/r", "v1"])
+            .args(args)
+            .assert();
+        if ok {
+            assert.success();
+        } else {
+            assert.failure().stderr(contains("Gitea"));
+            assert!(server.seen().is_empty(), "{args:?}: {:?}", server.seen());
+        }
+    }
 }

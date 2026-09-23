@@ -38,6 +38,22 @@ enum ReleaseAction {
 
 #[derive(Args)]
 struct ListArgs {
+    /// Maximum number of items to fetch
+    #[arg(short = 'L', long, default_value_t = 30)]
+    limit: i64,
+
+    /// Exclude draft releases
+    #[arg(long)]
+    exclude_drafts: bool,
+
+    /// Exclude pre-releases
+    #[arg(long)]
+    exclude_pre_releases: bool,
+
+    /// Order of releases returned
+    #[arg(short = 'O', long, value_parser = ["asc", "desc"], default_value = "desc")]
+    order: String,
+
     #[command(flatten)]
     json: crate::json::JsonArgs,
 }
@@ -77,6 +93,25 @@ struct CreateArgs {
     /// Abort in case the git tag doesn't already exist in the remote repository
     #[arg(long)]
     verify_tag: bool,
+
+    /// Fetch notes from the tag annotation or message of commit associated with tag
+    #[arg(long, conflicts_with_all = ["generate_notes", "notes_start_tag"])]
+    notes_from_tag: bool,
+
+    /// Mark this release as "Latest" (`--latest=false` to explicitly NOT set as latest).
+    /// Gitea can't mark releases: its latest is always the most recently created
+    /// published non-prerelease, so this only checks that the new release ends up
+    /// latest (or, with `=false`, that it can't be)
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    latest: Option<bool>,
+
+    /// Not supported: Gitea has no API for generating release notes
+    #[arg(long)]
+    generate_notes: bool,
+
+    /// Not supported: Gitea has no API for generating release notes
+    #[arg(long, value_name = "STRING")]
+    notes_start_tag: Option<String>,
 }
 
 #[derive(Args)]
@@ -231,70 +266,124 @@ async fn list_releases(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let releases = paginate::paginate(200, 50, |page, per_page| {
+    // Gitea lists newest first and can't sort the other way, so for `asc`
+    // fetch everything and keep the oldest `limit`.
+    let asc = args.order == "asc";
+    let fetch_limit = if asc { i64::MAX } else { args.limit };
+    let mut releases = paginate::paginate(fetch_limit, 50, |page, per_page| {
         let api = &api;
         async move {
-            Ok(api
+            let mut req = api
                 .repo_list_releases()
                 .owner(owner)
                 .repo(repo)
                 .page(page)
-                .limit(per_page)
-                .send()
-                .await
-                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-                .into_inner())
+                .limit(per_page);
+            if args.exclude_drafts {
+                req = req.draft(false);
+            }
+            if args.exclude_pre_releases {
+                req = req.pre_release(false);
+            }
+            Ok(req.send().await.map_err(api_error)?.into_inner())
         }
     })
     .await?;
-
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &releases, &RELEASE_FIELDS);
+    if asc {
+        releases.reverse();
+        releases.truncate(args.limit.max(0) as usize);
     }
 
-    if releases.is_empty() {
-        eprintln!("No releases found");
-        return Ok(());
+    if args.json.is_json() {
+        return crate::json::write_json(&args.json, &releases, RELEASE_FIELDS);
     }
 
     let is_tty = atty_check();
-    if is_tty {
-        println!(
-            "{:<6} {:<20} {:<30} {:<10} {}",
-            "ID", "TAG", "TITLE", "STATUS", "PUBLISHED"
-        );
+    if releases.is_empty() {
+        // Like gh: not a failure, and only worth saying to a person.
+        if is_tty {
+            eprintln!("no releases found");
+        }
+        return Ok(());
     }
 
-    for rel in &releases {
-        let id = rel.id.unwrap_or(0);
-        let tag = rel.tag_name.as_deref().unwrap_or("");
-        let name = rel.name.as_deref().unwrap_or("");
-        let truncated_name = if name.len() > 28 {
-            format!("{}...", &name[..25])
-        } else {
-            name.to_string()
-        };
+    let latest_id = latest_release(&api, owner, repo).await?.and_then(|r| r.id);
+    let rows: Vec<[String; 4]> = releases
+        .iter()
+        .map(|rel| {
+            let tag = rel.tag_name.clone().unwrap_or_default();
+            let name = rel.name.as_deref().unwrap_or("");
+            let title = name.split_whitespace().collect::<Vec<_>>().join(" ");
+            let title = if title.is_empty() { tag.clone() } else { title };
+            let badge = if rel.id.is_some() && rel.id == latest_id {
+                "Latest"
+            } else if rel.draft.unwrap_or(false) {
+                "Draft"
+            } else if rel.prerelease.unwrap_or(false) {
+                "Pre-release"
+            } else {
+                ""
+            };
+            let when = rel.published_at.or(rel.created_at);
+            let published = match when {
+                Some(dt) if is_tty => relative_time(dt),
+                Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                None => String::new(),
+            };
+            [title, badge.to_string(), tag, published]
+        })
+        .collect();
 
-        let status = if rel.draft.unwrap_or(false) {
-            "draft"
-        } else if rel.prerelease.unwrap_or(false) {
-            "pre"
-        } else {
-            "latest"
-        };
-
-        let published = rel
-            .published_at
-            .map(|dt| relative_time(dt))
-            .unwrap_or_default();
-
-        println!(
-            "{:<6} {:<20} {:<30} {:<10} {}",
-            id, tag, truncated_name, status, published
-        );
+    if !is_tty {
+        for row in &rows {
+            println!("{}", row.join("\t"));
+        }
+        return Ok(());
     }
 
+    let header = ["TITLE", "TYPE", "TAG NAME", "PUBLISHED"];
+    let width = |i: usize| {
+        rows.iter()
+            .map(|r| r[i].chars().count())
+            .chain([header[i].len()])
+            .max()
+            .unwrap_or(0)
+    };
+    let widths = [width(0), width(1), width(2)];
+    let line = |cols: [&str; 4]| {
+        format!(
+            "{:<w0$}  {:<w1$}  {:<w2$}  {}",
+            cols[0],
+            cols[1],
+            cols[2],
+            cols[3],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2]
+        )
+    };
+    println!("{}", line(header));
+    for [title, badge, tag, published] in &rows {
+        println!("{}", line([title, badge, tag, published]).trim_end());
+    }
     Ok(())
+}
+
+/// The release Gitea considers latest (the newest published non-prerelease), if any.
+async fn latest_release(api: &gitea_api::Gitea, owner: &str, repo: &str) -> Result<Option<Release>> {
+    match api
+        .repo_get_latest_release()
+        .owner(owner)
+        .repo(repo)
+        .send()
+        .await
+    {
+        Ok(rel) => Ok(Some(rel.into_inner())),
+        Err(e) => match gitea_api::GiteaError::from(e) {
+            gitea_api::GiteaError::Api { status: 404, .. } => Ok(None),
+            e => Err(eyre::eyre!("{e}")),
+        },
+    }
 }
 
 /// The release tagged `tag`, or the latest release when `tag` is `None`.
@@ -461,9 +550,14 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
+    if args.generate_notes || args.notes_start_tag.is_some() {
+        eyre::bail!(
+            "--generate-notes and --notes-start-tag are not supported: Gitea has no API for generating release notes"
+        );
+    }
     check_files(&args.files)?;
     let notes = read_notes(&args.notes, &args.notes_file)?;
-    let new = match &args.tag {
+    let mut new = match &args.tag {
         Some(tag) => NewRelease {
             tag: tag.clone(),
             title: args.title.clone().unwrap_or_else(|| tag.clone()),
@@ -479,8 +573,29 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
         }
     };
 
+    // Gitea has no "make latest": its latest release is always the newest
+    // published non-prerelease one.
+    let can_be_latest = !new.draft && !new.prerelease;
+    match args.latest {
+        Some(true) if !can_be_latest => eyre::bail!(
+            "--latest can't be used with a draft or prerelease: Gitea only treats published, non-prerelease releases as latest"
+        ),
+        Some(false) if can_be_latest => eyre::bail!(
+            "--latest=false is not supported: Gitea always treats the newest published non-prerelease release as latest"
+        ),
+        _ => {}
+    }
+
     if args.verify_tag {
         verify_tag(&api, owner, repo, &new.tag).await?;
+    }
+
+    if args.notes_from_tag {
+        let message = tag_message(&api, owner, repo, &new.tag).await?;
+        new.notes = Some(match new.notes.take().filter(|n| !n.is_empty()) {
+            Some(notes) => format!("{notes}\n{message}"),
+            None => message,
+        });
     }
 
     // Like gh: attach the files to a draft, then publish it once they're all there.
@@ -530,7 +645,42 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
     };
 
     println!("{}", rel.html_url.as_deref().unwrap_or(""));
+
+    if args.latest == Some(true) {
+        let latest = latest_release(&api, owner, repo).await?;
+        if latest.as_ref().and_then(|r| r.id) != rel.id {
+            let latest_tag = latest
+                .as_ref()
+                .and_then(|r| r.tag_name.as_deref())
+                .unwrap_or("none");
+            eyre::bail!(
+                "Gitea's latest release is {latest_tag}, not {}: Gitea can't mark a release latest; it picks the published non-prerelease created most recently (a release of an existing tag counts as created at the tag's commit)",
+                new.tag
+            );
+        }
+    }
     Ok(())
+}
+
+/// `--notes-from-tag`: the tag's annotation, or for a lightweight tag the
+/// message of its commit (Gitea's tag API returns whichever applies).
+async fn tag_message(api: &gitea_api::Gitea, owner: &str, repo: &str, tag: &str) -> Result<String> {
+    match api
+        .repo_get_tag()
+        .owner(owner)
+        .repo(repo)
+        .tag(tag)
+        .send()
+        .await
+    {
+        Ok(t) => Ok(t.into_inner().message.unwrap_or_default()),
+        Err(e) => match gitea_api::GiteaError::from(e) {
+            gitea_api::GiteaError::Api { status: 404, .. } => eyre::bail!(
+                "cannot generate release notes from tag {tag} as it does not exist in the repo {owner}/{repo}"
+            ),
+            e => Err(eyre::eyre!("{e}")),
+        },
+    }
 }
 
 /// What `release create` sends, from flags or prompts.
@@ -562,6 +712,8 @@ fn interactive_create_release(args: &CreateArgs, notes: Option<String>) -> Resul
 
     let notes = match notes {
         Some(notes) => Some(notes),
+        // Like gh, the tag's message stands in for notes the user would type.
+        None if args.notes_from_tag => None,
         None => Some(crate::prompt::edit_body("")?).filter(|n| !n.is_empty()),
     };
 
