@@ -59,11 +59,8 @@ fn load_config() -> Result<toml::Value> {
 
 fn save_config(config: &toml::Value) -> Result<()> {
     let path = config_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let content = toml::to_string_pretty(config)?;
-    std::fs::write(&path, content)?;
+    crate::config::write_config_file(&path, content)?;
     Ok(())
 }
 

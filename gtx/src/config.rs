@@ -128,13 +128,37 @@ fn migrate_config_dir(old: &Path, new: &Path) -> Result<()> {
     if new.exists() || !old_file.is_file() {
         return Ok(());
     }
-    std::fs::create_dir_all(new)?;
-    std::fs::copy(&old_file, new.join("config.toml"))
+    let content = std::fs::read(&old_file)
+        .wrap_err_with(|| format!("Migrating {} to {}", old.display(), new.display()))?;
+    write_config_file(&new.join("config.toml"), content)
         .wrap_err_with(|| format!("Migrating {} to {}", old.display(), new.display()))?;
     eprintln!("Migrated config from {} to {}", old.display(), new.display());
     Ok(())
 }
 
+/// Write the config file with owner-only permissions (0600 on Unix), since it
+/// holds API tokens. Creates parent dirs, and tightens the mode of an existing
+/// file too (the mode passed at open only applies on creation).
+pub fn write_config_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    use std::io::Write;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        opts.mode(0o600);
+        let file = opts.open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        (&file).write_all(contents.as_ref())?;
+    }
+    #[cfg(not(unix))]
+    opts.open(path)?.write_all(contents.as_ref())?;
+    Ok(())
+}
 
 /// Load aliases from config file. Returns empty map if no config or no aliases.
 pub fn load_aliases() -> HashMap<String, String> {
@@ -146,11 +170,8 @@ pub fn load_aliases() -> HashMap<String, String> {
 /// Ensure config directory and file exist, returning the path.
 fn ensure_config_file() -> Result<PathBuf> {
     let path = config_file()?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     if !path.exists() {
-        std::fs::write(&path, "")?;
+        write_config_file(&path, "")?;
     }
     Ok(path)
 }
@@ -168,7 +189,7 @@ pub fn set_alias(name: &str, expansion: &str) -> Result<()> {
         t.insert(name.to_string(), toml::Value::String(expansion.to_string()));
     }
 
-    std::fs::write(&path, doc.to_string())?;
+    write_config_file(&path, doc.to_string())?;
     Ok(())
 }
 
@@ -185,7 +206,7 @@ pub fn delete_alias(name: &str) -> Result<bool> {
     };
 
     if removed {
-        std::fs::write(&path, doc.to_string())?;
+        write_config_file(&path, doc.to_string())?;
     }
     Ok(removed)
 }
@@ -234,6 +255,56 @@ url = "https://gitea.example.com"
     fn test_parse_config_toml_invalid() {
         let result = parse_config_toml("not valid toml {{{{");
         assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_config_file_creates_private_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sub").join("config.toml");
+
+        write_config_file(&path, "token = \"t\"\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "token = \"t\"\n");
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_config_file_tightens_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "old contents that are longer").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_config_file(&path, "new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_migrate_config_dir_writes_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("gt");
+        let new = tmp.path().join("gtx");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("config.toml"), "x").unwrap();
+        std::fs::set_permissions(old.join("config.toml"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+
+        migrate_config_dir(&old, &new).unwrap();
+
+        assert_eq!(mode(&new.join("config.toml")), 0o600);
     }
 
     #[test]

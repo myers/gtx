@@ -106,14 +106,10 @@ fn login(args: &LoginArgs) -> Result<()> {
     url::Url::parse(&url).map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
 
     let path = config_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let content = format!(
         "[default]\nurl = \"{url}\"\ntoken = \"{token}\"\n"
     );
-    std::fs::write(&path, content)?;
+    crate::config::write_config_file(&path, content)?;
 
     eprintln!("Logged in to {url}");
     eprintln!("Config saved to {}", path.display());
