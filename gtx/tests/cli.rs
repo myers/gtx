@@ -264,3 +264,14 @@ fn test_migrates_old_config_dir() {
 
     assert!(home.path().join(".config/gtx/config.toml").is_file());
 }
+
+/// `repo create` names its owner as OWNER/NAME; -R would be silently ignored, so reject it.
+#[test]
+fn test_repo_create_rejects_repo_flag() {
+    Command::cargo_bin("gtx")
+        .unwrap()
+        .args(["repo", "create", "-R", "chaos-inc/x", "x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("OWNER/NAME"));
+}

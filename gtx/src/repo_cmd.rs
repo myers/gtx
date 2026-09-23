@@ -69,7 +69,7 @@ struct CloneArgs {
 
 #[derive(Args)]
 struct CreateArgs {
-    /// Repository name
+    /// Repository name, optionally prefixed with an owner (user or organization): [OWNER/]NAME
     name: String,
 
     /// Repository description
@@ -170,7 +170,7 @@ impl RepoCommand {
             RepoAction::View(args) => view_repo(&self.repo, args).await,
             RepoAction::List(args) => list_repos(args).await,
             RepoAction::Clone(args) => clone_repo(args).await,
-            RepoAction::Create(args) => create_repo(args).await,
+            RepoAction::Create(args) => create_repo(&self.repo, args).await,
             RepoAction::Fork(args) => fork_repo(args).await,
             RepoAction::Delete(args) => delete_repo(&self.repo, args).await,
             RepoAction::Edit(args) => edit_repo(&self.repo, args).await,
@@ -324,26 +324,59 @@ async fn clone_repo(args: &CloneArgs) -> Result<()> {
     Ok(())
 }
 
-async fn create_repo(args: &CreateArgs) -> Result<()> {
+/// Split a `repo create` argument of the form `[OWNER/]NAME`.
+fn split_create_name(arg: &str) -> Result<(Option<&str>, &str)> {
+    match arg.split_once('/') {
+        None if !arg.is_empty() => Ok((None, arg)),
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() && !name.contains('/') => {
+            Ok((Some(owner), name))
+        }
+        _ => eyre::bail!("Repository must be NAME or OWNER/NAME, got: {arg:?}"),
+    }
+}
+
+async fn create_repo(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> {
+    if repo_args.repo.is_some() {
+        eyre::bail!("`repo create` does not take -R; pass the owner as OWNER/NAME instead");
+    }
+    let (owner, name) = split_create_name(&args.name)?;
+
     let config = Config::load()?;
     let api = config.client()?;
 
-    let description = args.description.clone();
-    let private = args.private;
+    let body = |mut b: gitea_api::types::builder::CreateRepoOption| {
+        b = b.name(name.to_string()).private(args.private).auto_init(true);
+        if let Some(desc) = &args.description {
+            b = b.description(desc.clone());
+        }
+        b
+    };
 
-    let repo_data = api
-        .create_current_user_repo()
-        .body_map(|mut b| {
-            b = b.name(args.name.clone()).private(private).auto_init(true);
-            if let Some(desc) = description {
-                b = b.description(desc);
-            }
-            b
-        })
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-        .into_inner();
+    // Like `gh repo create OWNER/NAME`: the authenticated user's own namespace
+    // goes through /user/repos, any other owner is treated as an organization.
+    let org = match owner {
+        None => None,
+        Some(owner) => {
+            let me = api
+                .user_get_current()
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner();
+            let is_me = me
+                .login
+                .as_deref()
+                .is_some_and(|login| login.eq_ignore_ascii_case(owner));
+            (!is_me).then_some(owner)
+        }
+    };
+
+    let repo_data = match org {
+        None => api.create_current_user_repo().body_map(body).send().await,
+        Some(org) => api.create_org_repo().org(org).body_map(body).send().await,
+    }
+    .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+    .into_inner();
 
     let full_name = repo_data.full_name.as_deref().unwrap_or("");
     let url = repo_data.html_url.as_deref().unwrap_or("");
@@ -573,4 +606,29 @@ async fn deploy_key_delete(repo_args: &repo::RepoArgs, args: &DeployKeyDeleteArg
 
     eprintln!("Deleted deploy key #{}", args.id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_name_without_owner() {
+        assert_eq!(split_create_name("widget").unwrap(), (None, "widget"));
+    }
+
+    #[test]
+    fn create_name_with_owner() {
+        assert_eq!(
+            split_create_name("chaos-inc/drawbar-smoke").unwrap(),
+            (Some("chaos-inc"), "drawbar-smoke")
+        );
+    }
+
+    #[test]
+    fn create_name_rejects_malformed() {
+        for bad in ["", "/x", "x/", "a/b/c"] {
+            assert!(split_create_name(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
 }
