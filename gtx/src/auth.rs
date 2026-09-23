@@ -17,6 +17,8 @@ enum AuthAction {
     Status(AuthStatusArgs),
     /// Log out (remove config file)
     Logout,
+    /// Print the auth token gtx is configured to use
+    Token,
     /// Configure git to use gtx as credential helper
     SetupGit(SetupGitArgs),
     /// Git credential helper (used by git, not invoked directly)
@@ -65,6 +67,7 @@ impl AuthCommand {
             AuthAction::Login(args) => login(args),
             AuthAction::Status(args) => status(args).await,
             AuthAction::Logout => logout(),
+            AuthAction::Token => token(),
             AuthAction::SetupGit(args) => setup_git(args),
             AuthAction::GitCredential(args) => git_credential(args),
         }
@@ -190,7 +193,15 @@ async fn status(args: &AuthStatusArgs) -> Result<()> {
     }
 }
 
-fn mask_token(token: &str) -> String {
+/// Print the resolved token (env vars and `GITEA_SERVER` included), like
+/// `gh auth token`. This is the one command that prints a token in full.
+fn token() -> Result<()> {
+    let config = crate::config::Config::load()?;
+    println!("{}", config.token);
+    Ok(())
+}
+
+pub(crate) fn mask_token(token: &str) -> String {
     if token.len() > 8 {
         format!("{}...{}", &token[..4], &token[token.len() - 4..])
     } else if !token.is_empty() {

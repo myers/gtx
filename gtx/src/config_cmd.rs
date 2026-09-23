@@ -77,18 +77,14 @@ fn get_config(args: &GetArgs) -> Result<()> {
 
 fn set_config(args: &SetArgs) -> Result<()> {
     let parts: Vec<&str> = args.key.split('.').collect();
-    let value = toml_edit::value(args.value.as_str());
+    if parts.iter().any(|p| p.is_empty()) {
+        eyre::bail!("Invalid config key '{}'", args.key);
+    }
+    let (key, tables) = parts.split_last().expect("split yields at least one part");
 
     crate::config::edit_config_file(|doc| {
-        match parts[..] {
-            [section, key] => {
-                crate::config::section_mut(doc, section)?.insert(key, value);
-            }
-            [key] => {
-                doc.insert(key, value);
-            }
-            _ => eyre::bail!("Key must be 'key' or 'section.key' format"),
-        }
+        let value = toml_edit::value(args.value.as_str());
+        crate::config::table_mut(doc, tables)?.insert(key, value);
         Ok(())
     })?;
     eprintln!("Set {} = {}", args.key, args.value);
@@ -97,32 +93,33 @@ fn set_config(args: &SetArgs) -> Result<()> {
 
 fn list_config() -> Result<()> {
     let config = load_config()?;
-
-    if let Some(table) = config.as_table() {
-        if table.is_empty() {
-            eprintln!("No config values set");
-            return Ok(());
-        }
-        for (section, value) in table {
-            if let Some(inner) = value.as_table() {
-                for (key, val) in inner {
-                    match val {
-                        toml::Value::String(s) => println!("{section}.{key} = {s}"),
-                        other => println!("{section}.{key} = {other}"),
-                    }
-                }
-            } else {
-                match value {
-                    toml::Value::String(s) => println!("{section} = {s}"),
-                    other => println!("{section} = {other}"),
-                }
-            }
-        }
-    } else {
+    let mut lines = Vec::new();
+    if let toml::Value::Table(table) = &config {
+        flatten("", table, &mut lines);
+    }
+    if lines.is_empty() {
         eprintln!("No config values set");
     }
-
+    for line in lines {
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// Flatten nested tables into `a.b.c = value` lines. Tokens are masked the
+/// way `auth status` shows them; `gtx auth token` prints the real one.
+fn flatten(prefix: &str, table: &toml::Table, out: &mut Vec<String>) {
+    for (key, value) in table {
+        let full = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+        match value {
+            toml::Value::Table(inner) => flatten(&full, inner, out),
+            toml::Value::String(s) if key == "token" => {
+                out.push(format!("{full} = {}", crate::auth::mask_token(s)))
+            }
+            toml::Value::String(s) => out.push(format!("{full} = {s}")),
+            other => out.push(format!("{full} = {other}")),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -205,10 +205,30 @@ pub fn section_mut<'a>(
     doc: &'a mut toml_edit::DocumentMut,
     name: &str,
 ) -> Result<&'a mut dyn toml_edit::TableLike> {
-    doc.entry(name)
-        .or_insert_with(toml_edit::table)
-        .as_table_like_mut()
-        .ok_or_else(|| eyre::eyre!("Config key '{name}' is not a table"))
+    table_mut(doc, &[name])
+}
+
+/// The table at dotted `path` in `doc` (e.g. `["servers", "work"]`), with
+/// any missing tables created along the way. Intermediate tables are
+/// implicit, so a new `servers.home` is written as `[servers.home]` without a
+/// bare `[servers]` header.
+pub fn table_mut<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    path: &[&str],
+) -> Result<&'a mut dyn toml_edit::TableLike> {
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+    for (i, name) in path.iter().enumerate() {
+        table = table
+            .entry(name)
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(i + 1 < path.len());
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .ok_or_else(|| eyre::eyre!("Config key '{}' is not a table", path[..=i].join(".")))?;
+    }
+    Ok(table)
 }
 
 /// Set an alias in the config file.

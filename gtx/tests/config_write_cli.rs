@@ -140,3 +140,67 @@ fn writers_refuse_to_clobber_invalid_config() {
         .failure();
     assert_eq!(read(&path), "not valid toml {{{{\n");
 }
+
+#[test]
+fn config_set_nested_key_creates_server_profile() {
+    let (_dir, path) = setup();
+    gtx(&path)
+        .args(["config", "set", "servers.home.url", "https://home.example.com"])
+        .assert()
+        .success();
+    gtx(&path)
+        .args(["config", "set", "servers.work.url", "https://new.work.com"])
+        .assert()
+        .success();
+
+    let content = read(&path);
+    assert!(content.contains("[servers.home]"), "{content}");
+    assert!(!content.contains("[servers]\n"), "{content}");
+    assert!(content.contains("# my gtx config"), "{content}");
+    let parsed: toml::Table = content.parse().unwrap();
+    assert_eq!(parsed["servers"]["home"]["url"].as_str(), Some("https://home.example.com"));
+    assert_eq!(parsed["servers"]["work"]["url"].as_str(), Some("https://new.work.com"));
+    assert_eq!(parsed["servers"]["work"]["token"].as_str(), Some("work-token"));
+
+    gtx(&path)
+        .args(["config", "get", "servers.home.url"])
+        .assert()
+        .success()
+        .stdout("https://home.example.com\n");
+}
+
+#[test]
+fn config_set_rejects_bad_keys() {
+    let (_dir, path) = setup();
+    for key in ["default.url.x", "a..b", ".a", "a."] {
+        gtx(&path).args(["config", "set", key, "v"]).assert().failure();
+    }
+    assert_eq!(read(&path), EXISTING);
+}
+
+#[test]
+fn config_list_recurses_and_masks_tokens() {
+    let (_dir, path) = setup();
+    let out = gtx(&path).args(["config", "list"]).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("default.url = https://old.example.com\n"), "{stdout}");
+    assert!(stdout.contains("servers.work.url = https://gitea.work.com\n"), "{stdout}");
+    assert!(stdout.contains("servers.work.token = "), "{stdout}");
+    assert!(stdout.contains("default.token = "), "{stdout}");
+    assert!(stdout.contains("aliases.co = pr checkout\n"), "{stdout}");
+    assert!(!stdout.contains("old-token"), "{stdout}");
+    assert!(!stdout.contains("work-token"), "{stdout}");
+}
+
+#[test]
+fn auth_token_prints_resolved_token() {
+    let (_dir, path) = setup();
+    gtx(&path).args(["auth", "token"]).assert().success().stdout("old-token\n");
+    gtx(&path)
+        .env("GITEA_SERVER", "work")
+        .args(["auth", "token"])
+        .assert()
+        .success()
+        .stdout("work-token\n");
+}
