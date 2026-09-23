@@ -95,53 +95,94 @@ fn filter_fields(value: &serde_json::Value, fields: &[String]) -> serde_json::Va
 /// Pretty-print JSON, optionally applying jq filter.
 fn write_and_filter(args: &JsonArgs, value: &serde_json::Value) -> Result<()> {
     if let Some(ref expr) = args.jq_expr {
-        let results = jq_select(value, expr)?;
-        for r in results {
-            match r {
-                serde_json::Value::String(s) => println!("{s}"),
-                other => println!("{}", serde_json::to_string_pretty(&other)?),
-            }
-        }
+        print_jq(value, expr)
     } else {
         println!("{}", serde_json::to_string_pretty(value)?);
+        Ok(())
+    }
+}
+
+/// Run a jq filter over `value` and print each result on its own line.
+pub fn print_jq(value: &serde_json::Value, expr: &str) -> Result<()> {
+    for line in jq_lines(value, expr)? {
+        println!("{line}");
     }
     Ok(())
 }
 
-/// Simple jq-like field selector.
-/// Supports: .field, .[].field, .field.nested, .[].field.nested
-pub fn jq_select(value: &serde_json::Value, expr: &str) -> Result<Vec<serde_json::Value>> {
-    let expr = expr.trim_start_matches('.');
-    if expr.is_empty() {
-        return Ok(vec![value.clone()]);
+/// Run a jq filter over `value`, returning one line per output value, the
+/// way `gh --jq` does: strings raw, everything else as compact JSON.
+pub fn jq_lines(value: &serde_json::Value, expr: &str) -> Result<Vec<String>> {
+    use jaq_core::load::{Arena, File, Loader};
+    use jaq_core::{Compiler, Ctx, Vars, data, unwrap_valr};
+    use jaq_json::Val;
+
+    let input = jaq_json::read::parse_single(serde_json::to_string(value)?.as_bytes())
+        .map_err(|e| eyre::eyre!("jq input: {e}"))?;
+
+    let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
+    let funs = jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs());
+    let arena = Arena::default();
+    let modules = Loader::new(defs)
+        .load(&arena, File { code: expr, path: () })
+        .map_err(|_| eyre::eyre!("invalid jq expression: {expr}"))?;
+    let filter = Compiler::default()
+        .with_funs(funs)
+        .compile(modules)
+        .map_err(|_| eyre::eyre!("invalid jq expression: {expr}"))?;
+
+    let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new([]));
+    filter
+        .id
+        .run((ctx, input))
+        .map(unwrap_valr)
+        .map(|r| match r {
+            Ok(Val::TStr(s)) => Ok(String::from_utf8_lossy(&s).into_owned()),
+            Ok(v) => Ok(v.to_string()),
+            Err(e) => Err(eyre::eyre!("jq: {e}")),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn jq_multi_output_prints_each_result() {
+        let v = json!({"full_name": "chaos-inc/drawbar-smoke", "private": true});
+        assert_eq!(
+            jq_lines(&v, ".full_name,.private").unwrap(),
+            vec!["chaos-inc/drawbar-smoke", "true"]
+        );
     }
 
-    let parts: Vec<&str> = expr.splitn(2, '.').collect();
-    let (head, rest) = (parts[0], parts.get(1).copied());
-
-    if head == "[]" {
-        if let Some(arr) = value.as_array() {
-            let mut results = Vec::new();
-            for item in arr {
-                if let Some(rest) = rest {
-                    results.extend(jq_select(item, &format!(".{rest}"))?);
-                } else {
-                    results.push(item.clone());
-                }
-            }
-            return Ok(results);
-        }
-        return Ok(vec![]);
+    #[test]
+    fn jq_array_index() {
+        let v = json!([{"id": 252}, {"id": 251}]);
+        assert_eq!(jq_lines(&v, ".[0].id").unwrap(), vec!["252"]);
     }
 
-    if let Some(obj) = value.as_object() {
-        if let Some(field_value) = obj.get(head) {
-            if let Some(rest) = rest {
-                return jq_select(field_value, &format!(".{rest}"));
-            }
-            return Ok(vec![field_value.clone()]);
-        }
+    #[test]
+    fn jq_iterate_field() {
+        let v = json!([{"name": "a"}, {"name": "b"}]);
+        assert_eq!(jq_lines(&v, ".[].name").unwrap(), vec!["a", "b"]);
     }
 
-    Ok(vec![])
+    #[test]
+    fn jq_non_strings_are_compact_json() {
+        let v = json!({"o": {"a": [1, 2]}});
+        assert_eq!(jq_lines(&v, ".o").unwrap(), vec![r#"{"a":[1,2]}"#]);
+    }
+
+    #[test]
+    fn jq_invalid_expression_is_an_error() {
+        assert!(jq_lines(&json!({}), ".foo[").is_err());
+    }
+
+    #[test]
+    fn jq_runtime_error_is_an_error() {
+        assert!(jq_lines(&json!({"a": 1}), ".a[0]").is_err());
+    }
 }

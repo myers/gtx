@@ -235,15 +235,8 @@ impl ApiCommand {
 
     fn output(&self, text: &str) -> Result<()> {
         if let Some(ref expr) = self.jq_expr {
-            // Simple jq-like field extraction: .field or .[].field
             let parsed: serde_json::Value = serde_json::from_str(text)?;
-            let results = crate::json::jq_select(&parsed, expr)?;
-            for r in results {
-                match r {
-                    serde_json::Value::String(s) => println!("{s}"),
-                    other => println!("{}", serde_json::to_string_pretty(&other)?),
-                }
-            }
+            crate::json::print_jq(&parsed, expr)?;
         } else {
             // Pretty-print JSON, or raw if not JSON
             match serde_json::from_str::<serde_json::Value>(text) {

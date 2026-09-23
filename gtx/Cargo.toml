@@ -1,6 +1,6 @@
 [package]
 name = "gtx"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "Gitea CLI - like gh, but for Gitea"
 license = "MIT"
@@ -27,6 +27,9 @@ url = "2"
 inquire = "0.7"
 regex-lite = "0.1"
 tempfile = "3"
+jaq-core = "3"
+jaq-std = "3"
+jaq-json = "2"
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
