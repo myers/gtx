@@ -163,8 +163,50 @@ enum RunAction {
     Download(DownloadArgs),
 }
 
+/// Run statuses Gitea's `status` query parameter accepts.
+const RUN_STATUSES: &[&str] = &[
+    "queued", "in_progress", "completed", "pending", "waiting", "requested",
+    "action_required", "success", "failure", "skipped", "neutral", "cancelled",
+    "timed_out",
+];
+
+/// Server-side filters for the workflow-run list endpoint.
+#[derive(Args, Default)]
+struct RunFilterArgs {
+    /// Filter runs by the full SHA of the commit that triggered them
+    #[arg(short = 'c', long, value_name = "SHA")]
+    commit: Option<String>,
+
+    /// Filter runs by branch
+    #[arg(short, long)]
+    branch: Option<String>,
+
+    /// Filter runs by status
+    #[arg(short, long, value_parser = clap::builder::PossibleValuesParser::new(RUN_STATUSES))]
+    status: Option<String>,
+
+    /// Filter runs by the event that triggered them (push, pull_request, ...)
+    #[arg(short, long)]
+    event: Option<String>,
+
+    /// Filter runs by the user who triggered them
+    #[arg(short, long)]
+    user: Option<String>,
+}
+
 #[derive(Args)]
 struct ListArgs {
+    #[command(flatten)]
+    filter: RunFilterArgs,
+
+    /// Filter runs by workflow file name (e.g. ci.yml)
+    #[arg(short, long)]
+    workflow: Option<String>,
+
+    /// Maximum number of runs to fetch
+    #[arg(short = 'L', long, default_value = "20")]
+    limit: i64,
+
     #[command(flatten)]
     json: crate::json::JsonArgs,
 }
@@ -183,8 +225,18 @@ struct RerunArgs {
 
 #[derive(Args)]
 struct WatchArgs {
-    /// Run ID. If omitted, prompt to pick from in-progress runs.
+    /// Run ID. If omitted (and no --commit), prompt to pick from in-progress runs.
+    #[arg(conflicts_with = "commit")]
     id: Option<i64>,
+
+    /// Watch the run(s) triggered by this commit (full SHA) instead of a run ID.
+    #[arg(short = 'c', long, value_name = "SHA")]
+    commit: Option<String>,
+
+    /// With --commit: keep polling up to this many seconds for the commit's
+    /// runs to appear (they may not exist yet right after a push).
+    #[arg(long, value_name = "SECONDS", requires = "commit", default_value = "0")]
+    wait_for_run: u64,
 
     /// Refresh interval in seconds.
     #[arg(short = 'i', long, default_value = "3")]
@@ -225,31 +277,91 @@ impl RunCommand {
 
 const RUN_FIELDS: &[&str] = &[
     "id", "display_title", "status", "conclusion", "event", "head_branch",
-    "head_sha", "html_url", "started_at", "completed_at", "created_at",
+    "head_sha", "path", "html_url", "started_at", "completed_at", "created_at",
     "updated_at",
 ];
+
+/// Workflow runs carry `path` = `<workflow file>@<ref>`. Match a `--workflow`
+/// argument given either as the bare file name or as a path to it.
+fn run_matches_workflow(run: &gitea_api::types::ActionWorkflowRun, workflow: &str) -> bool {
+    let wanted = workflow.rsplit('/').next().unwrap_or(workflow);
+    run.path
+        .as_deref()
+        .and_then(|p| p.split('@').next())
+        .is_some_and(|file| file == wanted)
+}
+
+/// Fetch runs matching `filter` (server side) and `keep` (client side),
+/// paging until `limit` matches are collected or the server runs out.
+async fn fetch_runs(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    filter: &RunFilterArgs,
+    limit: i64,
+    keep: impl Fn(&gitea_api::types::ActionWorkflowRun) -> bool,
+) -> Result<Vec<gitea_api::types::ActionWorkflowRun>> {
+    const PER_PAGE: i64 = 50;
+    let mut runs = Vec::new();
+    let mut page = 1;
+    while (runs.len() as i64) < limit {
+        let per_page = PER_PAGE.min(limit);
+        let mut req = api
+            .get_workflow_runs()
+            .owner(owner)
+            .repo(repo)
+            .page(page)
+            .limit(per_page);
+        if let Some(v) = &filter.commit {
+            req = req.head_sha(v.as_str());
+        }
+        if let Some(v) = &filter.branch {
+            req = req.branch(v.as_str());
+        }
+        if let Some(v) = &filter.status {
+            req = req.status(v.as_str());
+        }
+        if let Some(v) = &filter.event {
+            req = req.event(v.as_str());
+        }
+        if let Some(v) = &filter.user {
+            req = req.actor(v.as_str());
+        }
+        let batch = req
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner()
+            .workflow_runs;
+        let got = batch.len() as i64;
+        runs.extend(batch.into_iter().filter(|r| keep(r)));
+        if got < per_page {
+            break;
+        }
+        page += 1;
+    }
+    runs.truncate(limit.max(0) as usize);
+    Ok(runs)
+}
 
 async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
 
-    let resp = api
-        .get_workflow_runs()
-        .owner(&repo_info.owner)
-        .repo(&repo_info.name)
-        .page(1)
-        .limit(30)
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-        .into_inner();
+    let runs = fetch_runs(
+        &api,
+        &repo_info.owner,
+        &repo_info.name,
+        &args.filter,
+        args.limit,
+        |run| args.workflow.as_deref().is_none_or(|w| run_matches_workflow(run, w)),
+    )
+    .await?;
 
     if args.json.is_json() {
-        return crate::json::write_json(&args.json, &resp.workflow_runs, &RUN_FIELDS);
+        return crate::json::write_json(&args.json, &runs, RUN_FIELDS);
     }
-
-    let runs = &resp.workflow_runs;
 
     if runs.is_empty() {
         eprintln!("No workflow runs found");
@@ -258,13 +370,10 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
 
     let is_tty = atty_check();
     if is_tty {
-        println!(
-            "{:<8} {:<30} {:<12} {:<10} {}",
-            "ID", "TITLE", "STATUS", "BRANCH", "STARTED"
-        );
+        println!("{:<8} {:<30} {:<12} {:<10} STARTED", "ID", "TITLE", "STATUS", "BRANCH");
     }
 
-    for run in runs {
+    for run in &runs {
         let id = run.id.unwrap_or(0);
         let title = run.display_title.as_deref().unwrap_or("");
         let truncated = if title.len() > 28 {
@@ -276,7 +385,7 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
         let branch = run.head_branch.as_deref().unwrap_or("");
         let started = run
             .started_at
-            .map(|dt| relative_time(dt))
+            .map(relative_time)
             .unwrap_or_default();
 
         println!("{:<8} {:<30} {:<12} {:<10} {}", id, truncated, status, branch, started);
@@ -415,11 +524,57 @@ async fn watch_run(repo_args: &repo::RepoArgs, args: &WatchArgs) -> Result<()> {
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo_name) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let run_id = match args.id {
-        Some(id) => id,
-        None => pick_run(&api, owner, repo_name).await?,
+    let run_ids = match (args.id, &args.commit) {
+        (Some(id), _) => vec![id],
+        (None, Some(sha)) => wait_for_commit_runs(&api, owner, repo_name, sha, args).await?,
+        (None, None) => vec![pick_run(&api, owner, repo_name).await?],
     };
 
+    let mut any_failed = false;
+    for run_id in run_ids {
+        any_failed |= watch_one(&api, owner, repo_name, run_id, args).await?;
+    }
+    if args.exit_status && any_failed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Poll for the runs `sha` triggered, for up to `--wait-for-run` seconds.
+async fn wait_for_commit_runs(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+    args: &WatchArgs,
+) -> Result<Vec<i64>> {
+    let filter = RunFilterArgs {
+        commit: Some(sha.to_string()),
+        ..Default::default()
+    };
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(args.wait_for_run);
+    loop {
+        let runs = fetch_runs(api, owner, repo, &filter, 100, |_| true).await?;
+        if !runs.is_empty() {
+            // The API lists newest first; watch in trigger order.
+            return Ok(runs.iter().rev().filter_map(|r| r.id).collect());
+        }
+        if std::time::Instant::now() >= deadline {
+            eyre::bail!("No workflow runs found for commit {sha}");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(args.interval)).await;
+    }
+}
+
+/// Watch one run until it reaches a terminal state. Returns whether it failed.
+async fn watch_one(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo_name: &str,
+    run_id: i64,
+    args: &WatchArgs,
+) -> Result<bool> {
     let is_tty = crate::issues::atty_check();
     let mut prev_lines: Option<usize> = None;
 
@@ -451,10 +606,7 @@ async fn watch_run(repo_args: &repo::RepoArgs, args: &WatchArgs) -> Result<()> {
         let status = run.status.as_deref().unwrap_or("");
         if is_terminal_status(status) {
             let conclusion = run.conclusion.as_deref().unwrap_or("");
-            if args.exit_status && (is_failure_conclusion(status) || is_failure_conclusion(conclusion)) {
-                std::process::exit(1);
-            }
-            return Ok(());
+            return Ok(is_failure_conclusion(status) || is_failure_conclusion(conclusion));
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(args.interval)).await;
@@ -722,6 +874,19 @@ mod tests {
 
         assert_eq!(in_progress_ids, vec![2, 3, 5], "in-progress includes waiting/queued/in_progress");
         assert_eq!(recent_ids, vec![1, 4], "recent is everything else");
+    }
+
+    #[test]
+    fn workflow_match_uses_file_name_before_ref() {
+        let run = gitea_api::types::ActionWorkflowRun {
+            path: Some("ci.yml@refs/heads/main".into()),
+            ..Default::default()
+        };
+        assert!(run_matches_workflow(&run, "ci.yml"));
+        assert!(run_matches_workflow(&run, ".forgejo/workflows/ci.yml"));
+        assert!(!run_matches_workflow(&run, "ci"));
+        assert!(!run_matches_workflow(&run, "release.yml"));
+        assert!(!run_matches_workflow(&Default::default(), "ci.yml"));
     }
 
     #[test]
