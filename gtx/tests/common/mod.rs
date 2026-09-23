@@ -11,6 +11,7 @@ use assert_cmd::Command;
 pub struct FakeGitea {
     pub url: String,
     seen: Arc<Mutex<Vec<String>>>,
+    auth: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl FakeGitea {
@@ -24,6 +25,8 @@ impl FakeGitea {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_thread = Arc::clone(&seen);
+        let auth = Arc::new(Mutex::new(Vec::new()));
+        let auth_thread = Arc::clone(&auth);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -33,6 +36,7 @@ impl FakeGitea {
                     continue;
                 }
                 let mut content_length = 0usize;
+                let mut authorization = None;
                 loop {
                     let mut header = String::new();
                     if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
@@ -42,6 +46,11 @@ impl FakeGitea {
                         && name.eq_ignore_ascii_case("content-length")
                     {
                         content_length = value.trim().parse().unwrap_or(0);
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("authorization")
+                    {
+                        authorization = Some(value.trim().to_string());
                     }
                 }
                 let mut req_body = vec![0; content_length];
@@ -55,6 +64,7 @@ impl FakeGitea {
                     .lock()
                     .unwrap()
                     .push(format!("{method} {target}"));
+                auth_thread.lock().unwrap().push(authorization);
                 let resp = if status == 204 {
                     "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_string()
                 } else {
@@ -66,7 +76,7 @@ impl FakeGitea {
                 let _ = stream.write_all(resp.as_bytes());
             }
         });
-        FakeGitea { url, seen }
+        FakeGitea { url, seen, auth }
     }
 
     pub fn gtx(&self) -> Command {
@@ -81,5 +91,10 @@ impl FakeGitea {
     /// Requests seen, as `"METHOD path_and_query"`.
     pub fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
+    }
+
+    /// `Authorization` header of each request, parallel to [`Self::seen`].
+    pub fn auth(&self) -> Vec<Option<String>> {
+        self.auth.lock().unwrap().clone()
     }
 }

@@ -197,6 +197,20 @@ impl Gitea {
         Ok(self.reqwest_client.execute(built).await?)
     }
 
+    /// GET an absolute URL outside the API, such as an attachment's
+    /// `browser_download_url` (a web route that redirects to the login page
+    /// without credentials). Auth headers are sent only when the URL shares
+    /// this instance's origin, so the token never goes to a foreign host.
+    pub async fn download(&self, url: &str) -> Result<reqwest::Response, GiteaError> {
+        let mut req = self.reqwest_client.get(url).build()?;
+        let same_origin = url::Url::parse(&self.base_url)
+            .is_ok_and(|base| base.origin() == req.url().origin());
+        if same_origin {
+            verbose::apply_auth_headers(&mut req);
+        }
+        Ok(self.reqwest_client.execute(req).await?)
+    }
+
     /// Make a fully customizable request. Used by `gtx api` for arbitrary endpoints
     /// with custom headers, methods, and bodies.
     pub async fn request(

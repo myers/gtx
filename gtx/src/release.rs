@@ -397,13 +397,8 @@ async fn download_release(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Re
 
         eprintln!("Downloading {filename}...");
 
-        // Strip base URL prefix to get the API path for raw_request
-        let path = url
-            .strip_prefix(api.base_url())
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| url.to_string());
         let resp = api
-            .raw_request(gitea_api::Method::GET, &path, None)
+            .download(url)
             .await
             .map_err(|e| eyre::eyre!("Download failed: {e}"))?;
 
