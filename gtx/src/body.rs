@@ -79,11 +79,13 @@ pub async fn upload_and_rewrite(
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            eprintln!("Warning: failed to upload {filename}: HTTP {}", status.as_u16());
-            continue;
-        }
+        let resp = match gitea_api::error_for_status(resp).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("Warning: failed to upload {filename}: {e}");
+                continue;
+            }
+        };
 
         let attachment: serde_json::Value = resp.json().await?;
         if let Some(download_url) = attachment["browser_download_url"].as_str() {

@@ -348,12 +348,9 @@ async fn registration_token(repo_args: &repo::RepoArgs, args: &TokenArgs) -> Res
         .raw_request(Method::POST, &path, None)
         .await
         .map_err(|e| eyre::eyre!("{e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        eyre::bail!("HTTP {status}: {body}");
-    }
+    let resp = gitea_api::error_for_status(resp)
+        .await
+        .map_err(|e| eyre::eyre!("{e}"))?;
 
     let body: serde_json::Value = resp.json().await?;
     let token = body

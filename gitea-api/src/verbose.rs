@@ -196,8 +196,41 @@ impl ClientHooks<()> for crate::Client {
         {
             print_response_head(&response, cfg);
         }
-        Ok(response)
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        capture_error_body(response).await
     }
+}
+
+/// A failed response's body, read by the `exec` hook so that the sync
+/// `From<progenitor_client::Error>` for [`crate::GiteaError`] can report the
+/// server's reason. Rides on the response as an extension.
+#[derive(Clone)]
+pub(crate) struct ErrorBody {
+    pub url: String,
+    pub body: String,
+}
+
+/// Read a failed response's body and rebuild the response around it, with
+/// the text (and the request URL, which a rebuilt response loses) attached
+/// as an [`ErrorBody`] extension.
+async fn capture_error_body(response: reqwest::Response) -> reqwest::Result<reqwest::Response> {
+    let url = response.url().to_string();
+    let mut builder = http::Response::builder()
+        .status(response.status())
+        .version(response.version());
+    if let Some(headers) = builder.headers_mut() {
+        *headers = response.headers().clone();
+    }
+    let bytes = response.bytes().await?;
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    let mut rebuilt: reqwest::Response = builder
+        .body(bytes)
+        .expect("status, version and headers came from a valid response")
+        .into();
+    rebuilt.extensions_mut().insert(ErrorBody { url, body });
+    Ok(rebuilt)
 }
 
 #[cfg(test)]

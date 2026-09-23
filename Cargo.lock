@@ -659,6 +659,7 @@ name = "gitea-api"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "http",
  "prettyplease",
  "progenitor",
  "progenitor-client",
@@ -671,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "gtx"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "assert_cmd",
  "chrono",

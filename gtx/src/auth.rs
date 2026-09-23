@@ -176,7 +176,7 @@ async fn status(args: &AuthStatusArgs) -> Result<()> {
                     eyre::bail!("token invalid (401)");
                 }
                 Some(code) => {
-                    eprintln!("Probe failed: server returned {code}");
+                    eprintln!("Probe failed: {}", gitea_api::GiteaError::from(e));
                     eyre::bail!("probe failed (HTTP {code})");
                 }
                 None => {

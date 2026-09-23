@@ -1,6 +1,6 @@
 [package]
 name = "gtx"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 description = "Gitea CLI - like gh, but for Gitea"
 license = "MIT"

@@ -401,15 +401,9 @@ async fn download_release(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Re
             .download(url)
             .await
             .map_err(|e| eyre::eyre!("Download failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            eyre::bail!(
-                "Download failed: {} {}",
-                status.as_u16(),
-                status.canonical_reason().unwrap_or("")
-            );
-        }
+        let resp = gitea_api::error_for_status(resp)
+            .await
+            .map_err(|e| eyre::eyre!("Download failed: {e}"))?;
 
         let bytes = resp.bytes().await?;
         std::fs::write(filename, &bytes)?;
@@ -512,15 +506,9 @@ async fn upload_assets(repo_args: &repo::RepoArgs, args: &UploadArgs) -> Result<
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let message = parsed["message"]
-                .as_str()
-                .unwrap_or(status.canonical_reason().unwrap_or("Error"));
-            eyre::bail!("HTTP {}: {message}", status.as_u16());
-        }
+        gitea_api::error_for_status(resp)
+            .await
+            .map_err(|e| eyre::eyre!("{e}"))?;
 
         eprintln!("Uploaded {filename} to release #{}", args.id);
     }

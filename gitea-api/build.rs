@@ -97,6 +97,17 @@ fn main() {
         r#"#[serde(default, deserialize_with = "crate::null_as_default", skip_serializing_if = "::std::vec::Vec::is_empty")]"#,
     );
 
+    // For error statuses the spec documents, progenitor emits
+    // `Error::ErrorResponse(ResponseValue::empty(response))`, which keeps only
+    // the status and headers and drops the response, and with it the body
+    // the `exec` hook captured (see `verbose.rs`). Hand the whole response
+    // back instead, as for undocumented statuses, so `GiteaError::from` can
+    // show the server's reason rather than just "HTTP 422: Unprocessable
+    // Entity" (#7).
+    const EMPTY_ERROR: &str = "Err(Error::ErrorResponse(ResponseValue::empty(response)))";
+    assert!(content.contains(EMPTY_ERROR), "progenitor's error arm changed shape");
+    content = content.replace(EMPTY_ERROR, "Err(Error::UnexpectedResponse(response))");
+
     let out_file = Path::new(&env::var("OUT_DIR").unwrap()).join("codegen.rs");
     fs::write(out_file, content).unwrap();
 }

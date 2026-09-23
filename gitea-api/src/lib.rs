@@ -36,8 +36,15 @@ where
 /// Errors from the Gitea API client.
 #[derive(Debug)]
 pub enum GiteaError {
-    /// API error with HTTP status code and message.
-    Api { status: u16, message: String },
+    /// The server answered with a non-success status. `message` is the
+    /// server's own reason when the body carried one (Gitea's JSON
+    /// `message`, else the body text), falling back to the status's
+    /// canonical reason; `url` is the request URL, when known.
+    Api {
+        status: u16,
+        message: String,
+        url: Option<String>,
+    },
     /// HTTP/reqwest error.
     Http(reqwest::Error),
     /// URL must use http or https scheme.
@@ -49,7 +56,18 @@ pub enum GiteaError {
 impl std::fmt::Display for GiteaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GiteaError::Api { status, message } => write!(f, "HTTP {status}: {message}"),
+            // Same shape as `gh`: `HTTP 422: <message> (<request url>)`.
+            GiteaError::Api {
+                status,
+                message,
+                url,
+            } => {
+                write!(f, "HTTP {status}: {message}")?;
+                if let Some(url) = url {
+                    write!(f, " ({url})")?;
+                }
+                Ok(())
+            }
             GiteaError::Http(e) => write!(f, "{e}"),
             GiteaError::HttpRequired => {
                 write!(f, "URL must use http:// or https:// scheme")
@@ -63,22 +81,95 @@ impl std::fmt::Display for GiteaError {
 
 impl std::error::Error for GiteaError {}
 
-/// Extract a clean error from a progenitor error with any error body type.
-fn format_progenitor_error<E: std::fmt::Debug>(e: &progenitor_client::Error<E>) -> (u16, String) {
-    match e.status() {
-        Some(status) => {
-            let code = status.as_u16();
-            let reason = status.canonical_reason().unwrap_or("Error");
-            (code, reason.to_string())
+/// Longest body excerpt shown when an error body isn't Gitea's JSON.
+const MAX_RAW_ERROR_CHARS: usize = 200;
+
+/// The server's reason for a failed request: the JSON `message` (plus any
+/// `errors` detail), else the body's first line (truncated), else the
+/// status's canonical reason.
+fn error_message(status: reqwest::StatusCode, body: &str) -> String {
+    let reason = || status.canonical_reason().unwrap_or("Error").to_string();
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        let message = json["message"].as_str().unwrap_or_default().trim();
+        let errors: Vec<&str> = json["errors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|e| !e.is_empty())
+            .collect();
+        let message = if message.is_empty() {
+            reason()
+        } else {
+            message.to_string()
+        };
+        return if errors.is_empty() {
+            message
+        } else {
+            format!("{message}: {}", errors.join("; "))
+        };
+    }
+    let line = body.trim().lines().next().unwrap_or_default().trim();
+    // An HTML page (proxy error, login redirect) says nothing useful inline.
+    if line.is_empty() || line.starts_with('<') {
+        return reason();
+    }
+    match line.char_indices().nth(MAX_RAW_ERROR_CHARS) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line.to_string(),
+    }
+}
+
+impl GiteaError {
+    /// Build the error for a failed response from its parts.
+    pub fn from_body(status: reqwest::StatusCode, url: Option<&str>, body: &str) -> Self {
+        GiteaError::Api {
+            status: status.as_u16(),
+            message: error_message(status, body),
+            url: url.map(str::to_string),
         }
-        None => (0, format!("{e}")),
+    }
+
+    /// Consume a failed response, reading its body for the server's reason.
+    pub async fn from_response(resp: reqwest::Response) -> Self {
+        let status = resp.status();
+        if let Some(captured) = resp.extensions().get::<verbose::ErrorBody>() {
+            return Self::from_body(status, Some(&captured.url), &captured.body);
+        }
+        let url = resp.url().to_string();
+        let body = resp.text().await.unwrap_or_default();
+        Self::from_body(status, Some(&url), &body)
+    }
+}
+
+/// Pass a successful response through; turn a failed one into
+/// [`GiteaError::Api`] carrying the server's reason.
+pub async fn error_for_status(resp: reqwest::Response) -> Result<reqwest::Response, GiteaError> {
+    if resp.status().is_success() {
+        Ok(resp)
+    } else {
+        Err(GiteaError::from_response(resp).await)
     }
 }
 
 impl<E: std::fmt::Debug> From<progenitor_client::Error<E>> for GiteaError {
     fn from(e: progenitor_client::Error<E>) -> Self {
-        let (status, message) = format_progenitor_error(&e);
-        GiteaError::Api { status, message }
+        // The client's `exec` hook buffers every failed response's body into
+        // an `ErrorBody` extension (see `verbose.rs`), so it can be read
+        // here without awaiting.
+        if let progenitor_client::Error::UnexpectedResponse(resp) = &e
+            && let Some(captured) = resp.extensions().get::<verbose::ErrorBody>()
+        {
+            return Self::from_body(resp.status(), Some(&captured.url), &captured.body);
+        }
+        match e.status() {
+            Some(status) => Self::from_body(status, None, ""),
+            None => GiteaError::Api {
+                status: 0,
+                message: e.to_string(),
+                url: None,
+            },
+        }
     }
 }
 
@@ -163,21 +254,7 @@ impl Gitea {
         let mut req = self.reqwest_client.get(&url).build()?;
         verbose::apply_auth_headers(&mut req);
         let resp = self.reqwest_client.execute(req).await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let reason = status.canonical_reason().unwrap_or("Error");
-            let message = parsed["message"]
-                .as_str()
-                .unwrap_or(reason)
-                .to_string();
-            return Err(GiteaError::Api {
-                status: status.as_u16(),
-                message,
-            });
-        }
-        Ok(resp.text().await?)
+        Ok(error_for_status(resp).await?.text().await?)
     }
 
     /// Make a raw request with method, path, and optional JSON body.

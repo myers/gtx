@@ -652,11 +652,9 @@ async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> 
             .raw_request(gitea_api::Method::GET, &download_path, None)
             .await
             .map_err(|e| eyre::eyre!("{e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            eyre::bail!("Failed to download {name}: HTTP {}", status.as_u16());
-        }
+        let resp = gitea_api::error_for_status(resp)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to download {name}: {e}"))?;
 
         let bytes = resp.bytes().await?;
         let filename = format!("{name}.zip");
