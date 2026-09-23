@@ -3,6 +3,7 @@
 //! `GTX_CONFIG` at a temp file so the real config is never touched.
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use std::path::Path;
 
 const EXISTING: &str = r#"# my gtx config
@@ -210,6 +211,35 @@ fn auth_status_masks_non_ascii_token_without_panicking() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Token: ***********\n"));
+}
+
+#[test]
+fn auth_status_masks_token_by_default() {
+    let (_dir, path) = setup();
+    gtx(&path)
+        .args(["auth", "status", "--no-check"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Token: *********\n"))
+        .stdout(predicates::str::contains("old-token").not());
+}
+
+#[test]
+fn auth_status_show_token_prints_full_token() {
+    let (_dir, path) = setup();
+    for flag in ["-t", "--show-token"] {
+        gtx(&path)
+            .args(["auth", "status", "--no-check", flag])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("Token: old-token\n"));
+    }
+    gtx(&path)
+        .env("GITEA_SERVER", "work")
+        .args(["auth", "status", "--no-check", "-t"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Token: work-token\n"));
 }
 
 #[test]

@@ -31,6 +31,10 @@ struct AuthStatusArgs {
     /// Useful for shell prompts that need zero-network output.
     #[arg(long = "no-check")]
     no_check: bool,
+
+    /// Display the auth token
+    #[arg(short = 't', long = "show-token")]
+    show_token: bool,
 }
 
 #[derive(Args)]
@@ -148,7 +152,12 @@ async fn status(args: &AuthStatusArgs) -> Result<()> {
     };
 
     println!("URL:   {}", api_config.url);
-    println!("Token: {}", mask_token(&api_config.token));
+    let token = if args.show_token && !api_config.token.is_empty() {
+        api_config.token.clone()
+    } else {
+        mask_token(&api_config.token)
+    };
+    println!("Token: {token}");
     println!("Config: {path_display}");
 
     if args.no_check {
@@ -194,7 +203,8 @@ async fn status(args: &AuthStatusArgs) -> Result<()> {
 }
 
 /// Print the resolved token (env vars and `GITEA_SERVER` included), like
-/// `gh auth token`. This is the one command that prints a token in full.
+/// `gh auth token`. Only this and `auth status --show-token` print a token
+/// in full.
 fn token() -> Result<()> {
     let config = crate::config::Config::load()?;
     println!("{}", config.token);
