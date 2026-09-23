@@ -131,8 +131,6 @@ async fn set_variable(repo_args: &repo::RepoArgs, args: &SetArgs) -> Result<()> 
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
     // Try update first, if 404 then create
-    // Note: update returns 204 No Content which progenitor treats as an error,
-    // so we check the status code to distinguish real errors from success.
     let update_result = api
         .update_repo_variable()
         .owner(owner)
@@ -140,33 +138,25 @@ async fn set_variable(repo_args: &repo::RepoArgs, args: &SetArgs) -> Result<()> 
         .variablename(&args.name)
         .body_map(|b| b.value(args.value.clone()))
         .send()
-        .await;
+        .await
+        .map_err(gitea_api::GiteaError::from);
 
     match update_result {
         Ok(_) => {
             eprintln!("Variable '{}' updated", args.name);
         }
-        Err(e) => {
-            let err = gitea_api::GiteaError::from(e);
-            let msg = err.to_string();
-            if msg.contains("204") {
-                // 204 No Content = success for updates
-                eprintln!("Variable '{}' updated", args.name);
-            } else if msg.contains("404") {
-                // Create new variable
-                api.create_repo_variable()
-                    .owner(owner)
-                    .repo(repo)
-                    .variablename(&args.name)
-                    .body_map(|b| b.value(args.value.clone()))
-                    .send()
-                    .await
-                    .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
-                eprintln!("Variable '{}' created", args.name);
-            } else {
-                return Err(eyre::eyre!("{err}"));
-            }
+        Err(gitea_api::GiteaError::Api { status: 404, .. }) => {
+            api.create_repo_variable()
+                .owner(owner)
+                .repo(repo)
+                .variablename(&args.name)
+                .body_map(|b| b.value(args.value.clone()))
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+            eprintln!("Variable '{}' created", args.name);
         }
+        Err(err) => return Err(eyre::eyre!("{err}")),
     }
 
     Ok(())
@@ -178,23 +168,13 @@ async fn delete_variable(repo_args: &repo::RepoArgs, args: &DeleteArgs) -> Resul
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let result = api
-        .delete_repo_variable()
+    api.delete_repo_variable()
         .owner(owner)
         .repo(repo)
         .variablename(&args.name)
         .send()
-        .await;
-
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            let err = gitea_api::GiteaError::from(e);
-            if !err.to_string().contains("204") {
-                return Err(eyre::eyre!("{err}"));
-            }
-        }
-    }
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Variable '{}' deleted", args.name);
     Ok(())

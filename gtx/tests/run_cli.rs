@@ -1,66 +1,9 @@
-//! `gtx run` against a tiny in-process fake Gitea, so we can assert on the
-//! query string gtx sends and on how it treats the response.
-
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+mod common;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-/// Fake server: answers every request with `route(path_and_query)` as a JSON
-/// body and records the request targets it saw.
-struct FakeGitea {
-    url: String,
-    seen: Arc<Mutex<Vec<String>>>,
-}
-
-impl FakeGitea {
-    fn start(route: impl Fn(&str) -> String + Send + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let seen_thread = Arc::clone(&seen);
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut request_line = String::new();
-                if reader.read_line(&mut request_line).is_err() {
-                    continue;
-                }
-                loop {
-                    let mut header = String::new();
-                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
-                        break;
-                    }
-                }
-                let target = request_line.split_whitespace().nth(1).unwrap_or("").to_string();
-                let body = route(&target);
-                seen_thread.lock().unwrap().push(target);
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(resp.as_bytes());
-            }
-        });
-        FakeGitea { url, seen }
-    }
-
-    fn gtx(&self) -> Command {
-        let mut cmd = Command::cargo_bin("gtx").unwrap();
-        cmd.env("GITEA_URL", &self.url)
-            .env("GITEA_TOKEN", "t")
-            .env_remove("GITEA_SERVER")
-            .env("GTX_CONFIG", "/nonexistent/gtx-test.toml");
-        cmd
-    }
-
-    fn seen(&self) -> Vec<String> {
-        self.seen.lock().unwrap().clone()
-    }
-}
+use common::FakeGitea;
 
 fn runs_json(runs: &[(i64, &str, &str)]) -> String {
     let items: Vec<String> = runs
@@ -92,7 +35,7 @@ fn run_list_passes_filters_to_server() {
     let seen = server.seen();
     assert_eq!(seen.len(), 1, "{seen:?}");
     let q = &seen[0];
-    assert!(q.starts_with("/api/v1/repos/o/r/actions/runs?"), "{q}");
+    assert!(q.starts_with("GET /api/v1/repos/o/r/actions/runs?"), "{q}");
     for want in [
         format!("head_sha={sha}"),
         "branch=main".into(),

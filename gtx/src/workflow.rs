@@ -132,11 +132,15 @@ async fn run_workflow(repo_args: &repo::RepoArgs, args: &RunArgs) -> Result<()> 
     let inputs: std::collections::HashMap<String, String> =
         args.input.iter().cloned().collect();
 
-    let result = api
+    // Without return_run_details the server answers 204 No Content. Servers
+    // too old to know the parameter still do, so an empty success body means
+    // the dispatch happened but there are no run details to show.
+    let result = match api
         .actions_dispatch_workflow()
         .owner(owner)
         .repo(repo)
         .workflow_id(&args.workflow)
+        .return_run_details(true)
         .body_map(|mut b| {
             b = b.ref_(args.ref_.clone());
             if !inputs.is_empty() {
@@ -146,11 +150,14 @@ async fn run_workflow(repo_args: &repo::RepoArgs, args: &RunArgs) -> Result<()> 
         })
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-        .into_inner();
+    {
+        Ok(details) => Some(details.into_inner()),
+        Err(gitea_api::Error::InvalidResponsePayload(body, _)) if body.is_empty() => None,
+        Err(e) => return Err(eyre::eyre!("{}", gitea_api::GiteaError::from(e))),
+    };
 
-    if let Some(run_id) = result.workflow_run_id {
-        let url = result.html_url.as_deref().unwrap_or("");
+    if let Some(run_id) = result.as_ref().and_then(|r| r.workflow_run_id) {
+        let url = result.as_ref().and_then(|r| r.html_url.as_deref()).unwrap_or("");
         eprintln!("Triggered workflow '{}' → run #{run_id}", args.workflow);
         if !url.is_empty() {
             eprintln!("{url}");
@@ -168,24 +175,13 @@ async fn enable_workflow(repo_args: &repo::RepoArgs, args: &ToggleArgs) -> Resul
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let result = api
-        .actions_enable_workflow()
+    api.actions_enable_workflow()
         .owner(owner)
         .repo(repo)
         .workflow_id(&args.workflow)
         .send()
-        .await;
-
-    // 204 No Content is success
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            let err = gitea_api::GiteaError::from(e);
-            if !err.to_string().contains("204") {
-                return Err(eyre::eyre!("{err}"));
-            }
-        }
-    }
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Enabled workflow '{}'", args.workflow);
     Ok(())
@@ -197,24 +193,13 @@ async fn disable_workflow(repo_args: &repo::RepoArgs, args: &ToggleArgs) -> Resu
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let result = api
-        .actions_disable_workflow()
+    api.actions_disable_workflow()
         .owner(owner)
         .repo(repo)
         .workflow_id(&args.workflow)
         .send()
-        .await;
-
-    // 204 No Content is success
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            let err = gitea_api::GiteaError::from(e);
-            if !err.to_string().contains("204") {
-                return Err(eyre::eyre!("{err}"));
-            }
-        }
-    }
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
     eprintln!("Disabled workflow '{}'", args.workflow);
     Ok(())
