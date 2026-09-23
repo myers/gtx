@@ -57,13 +57,6 @@ fn load_config() -> Result<toml::Value> {
     Ok(config)
 }
 
-fn save_config(config: &toml::Value) -> Result<()> {
-    let path = config_path()?;
-    let content = toml::to_string_pretty(config)?;
-    crate::config::write_config_file(&path, content)?;
-    Ok(())
-}
-
 fn get_config(args: &GetArgs) -> Result<()> {
     let config = load_config()?;
     let parts: Vec<&str> = args.key.split('.').collect();
@@ -83,36 +76,21 @@ fn get_config(args: &GetArgs) -> Result<()> {
 }
 
 fn set_config(args: &SetArgs) -> Result<()> {
-    let mut config = load_config()?;
     let parts: Vec<&str> = args.key.split('.').collect();
+    let value = toml_edit::value(args.value.as_str());
 
-    if parts.len() == 2 {
-        let table = config
-            .as_table_mut()
-            .ok_or_else(|| eyre::eyre!("Config is not a table"))?;
-        let section = table
-            .entry(parts[0])
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        let section_table = section
-            .as_table_mut()
-            .ok_or_else(|| eyre::eyre!("Section '{}' is not a table", parts[0]))?;
-        section_table.insert(
-            parts[1].to_string(),
-            toml::Value::String(args.value.clone()),
-        );
-    } else if parts.len() == 1 {
-        let table = config
-            .as_table_mut()
-            .ok_or_else(|| eyre::eyre!("Config is not a table"))?;
-        table.insert(
-            parts[0].to_string(),
-            toml::Value::String(args.value.clone()),
-        );
-    } else {
-        eyre::bail!("Key must be 'key' or 'section.key' format");
-    }
-
-    save_config(&config)?;
+    crate::config::edit_config_file(|doc| {
+        match parts[..] {
+            [section, key] => {
+                crate::config::section_mut(doc, section)?.insert(key, value);
+            }
+            [key] => {
+                doc.insert(key, value);
+            }
+            _ => eyre::bail!("Key must be 'key' or 'section.key' format"),
+        }
+        Ok(())
+    })?;
     eprintln!("Set {} = {}", args.key, args.value);
     Ok(())
 }

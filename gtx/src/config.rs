@@ -167,48 +167,66 @@ pub fn load_aliases() -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Ensure config directory and file exist, returning the path.
-fn ensure_config_file() -> Result<PathBuf> {
-    let path = config_file()?;
-    if !path.exists() {
-        write_config_file(&path, "")?;
+/// Read-modify-write the config file: parse it (a missing file is an empty
+/// document), let `edit` change it, and write it back only if it changed.
+///
+/// Editing the parsed document rather than regenerating the file keeps every
+/// section, comment, and bit of formatting the edit doesn't touch. An
+/// unparseable file is an error, never silently replaced.
+pub fn edit_config_file<T>(
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
+) -> Result<T> {
+    edit_config_at(&config_file()?, edit)
+}
+
+fn edit_config_at<T>(
+    path: &Path,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
+) -> Result<T> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).wrap_err_with(|| format!("Reading {}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
+        .wrap_err_with(|| format!("Parsing {}", path.display()))?;
+    let out = edit(&mut doc)?;
+    let updated = doc.to_string();
+    if updated != content {
+        write_config_file(path, updated)?;
     }
-    Ok(path)
+    Ok(out)
+}
+
+/// The table `name` at the top level of `doc`, created (as a `[name]`
+/// section) if missing.
+pub fn section_mut<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    name: &str,
+) -> Result<&'a mut dyn toml_edit::TableLike> {
+    doc.entry(name)
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or_else(|| eyre::eyre!("Config key '{name}' is not a table"))
 }
 
 /// Set an alias in the config file.
 pub fn set_alias(name: &str, expansion: &str) -> Result<()> {
-    let path = ensure_config_file()?;
-    let content = std::fs::read_to_string(&path)?;
-    let mut doc: toml::Table = content.parse().unwrap_or_default();
-
-    let aliases = doc
-        .entry("aliases")
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if let toml::Value::Table(t) = aliases {
-        t.insert(name.to_string(), toml::Value::String(expansion.to_string()));
-    }
-
-    write_config_file(&path, doc.to_string())?;
-    Ok(())
+    edit_config_file(|doc| {
+        section_mut(doc, "aliases")?.insert(name, toml_edit::value(expansion));
+        Ok(())
+    })
 }
 
 /// Delete an alias from the config file.
 pub fn delete_alias(name: &str) -> Result<bool> {
-    let path = ensure_config_file()?;
-    let content = std::fs::read_to_string(&path)?;
-    let mut doc: toml::Table = content.parse().unwrap_or_default();
-
-    let removed = if let Some(toml::Value::Table(t)) = doc.get_mut("aliases") {
-        t.remove(name).is_some()
-    } else {
-        false
-    };
-
-    if removed {
-        write_config_file(&path, doc.to_string())?;
-    }
-    Ok(removed)
+    edit_config_file(|doc| {
+        Ok(doc
+            .get_mut("aliases")
+            .and_then(|a| a.as_table_like_mut())
+            .is_some_and(|t| t.remove(name).is_some()))
+    })
 }
 
 #[cfg(test)]
@@ -346,6 +364,51 @@ url = "https://gitea.example.com"
         migrate_config_dir(&tmp.path().join("gt"), &new).unwrap();
 
         assert!(!new.exists());
+    }
+
+    #[test]
+    fn test_edit_config_at_preserves_untouched_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let original = "# comment\n[servers.work]\nurl = \"u\" # trailing\n";
+        std::fs::write(&path, original).unwrap();
+
+        edit_config_at(&path, |doc| {
+            section_mut(doc, "aliases")?.insert("co", toml_edit::value("pr checkout"));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{original}\n[aliases]\nco = \"pr checkout\"\n")
+        );
+    }
+
+    #[test]
+    fn test_edit_config_at_skips_write_when_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        edit_config_at(&path, |_| Ok(())).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_edit_config_at_rejects_invalid_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "not valid {{{{").unwrap();
+
+        assert!(edit_config_at(&path, |_| Ok(())).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not valid {{{{");
+    }
+
+    #[test]
+    fn test_section_mut_rejects_non_table() {
+        let mut doc: toml_edit::DocumentMut = "aliases = 3\n".parse().unwrap();
+        assert!(section_mut(&mut doc, "aliases").is_err());
     }
 
     #[test]

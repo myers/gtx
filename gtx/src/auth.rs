@@ -106,10 +106,12 @@ fn login(args: &LoginArgs) -> Result<()> {
     url::Url::parse(&url).map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
 
     let path = config_path()?;
-    let content = format!(
-        "[default]\nurl = \"{url}\"\ntoken = \"{token}\"\n"
-    );
-    crate::config::write_config_file(&path, content)?;
+    crate::config::edit_config_file(|doc| {
+        let default = crate::config::section_mut(doc, "default")?;
+        default.insert("url", toml_edit::value(&url));
+        default.insert("token", toml_edit::value(&token));
+        Ok(())
+    })?;
 
     eprintln!("Logged in to {url}");
     eprintln!("Config saved to {}", path.display());
@@ -201,13 +203,23 @@ fn mask_token(token: &str) -> String {
 fn logout() -> Result<()> {
     let path = config_path()?;
 
-    if !path.exists() {
-        eprintln!("Already logged out (no config file)");
-        return Ok(());
+    // Drop only the `[default]` credentials; named servers, aliases, and the
+    // comments around them stay.
+    let removed = crate::config::edit_config_file(|doc| {
+        Ok(doc
+            .get_mut("default")
+            .and_then(|d| d.as_table_like_mut())
+            .is_some_and(|d| {
+                let url = d.remove("url").is_some();
+                let token = d.remove("token").is_some();
+                url || token
+            }))
+    })?;
+    if removed {
+        eprintln!("Logged out (removed default credentials from {})", path.display());
+    } else {
+        eprintln!("Already logged out (no default credentials in {})", path.display());
     }
-
-    std::fs::remove_file(&path)?;
-    eprintln!("Logged out (removed {})", path.display());
     Ok(())
 }
 
