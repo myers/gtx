@@ -242,8 +242,10 @@ async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
             match state_str.as_str() {
                 "open" => req = req.state(gitea_api::types::IssueListIssuesState::Open),
                 "closed" => req = req.state(gitea_api::types::IssueListIssuesState::Closed),
-                _ => {}
+                _ => req = req.state(gitea_api::types::IssueListIssuesState::All),
             }
+            // Gitea's issues endpoint also returns PRs unless told otherwise; gh never lists them.
+            req = req.type_(gitea_api::types::IssueListIssuesType::Issues);
             Ok(req.send().await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?.into_inner())
         }
     })
@@ -774,6 +776,7 @@ async fn status_issues(repo_args: &repo::RepoArgs, _args: &StatusArgs) -> Result
         .owner(owner)
         .repo(repo)
         .state(gitea_api::types::IssueListIssuesState::Open)
+        .type_(gitea_api::types::IssueListIssuesType::Issues)
         .page(1)
         .limit(20)
         .send()

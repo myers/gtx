@@ -330,7 +330,7 @@ async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
             match state_str.as_str() {
                 "open" => req = req.state(gitea_api::types::RepoListPullRequestsState::Open),
                 "closed" => req = req.state(gitea_api::types::RepoListPullRequestsState::Closed),
-                _ => {}
+                _ => req = req.state(gitea_api::types::RepoListPullRequestsState::All),
             }
             Ok(req.send().await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?.into_inner())
         }
