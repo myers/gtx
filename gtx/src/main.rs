@@ -77,7 +77,7 @@ enum Command {
     Run(run::RunCommand),
     /// Manage Actions runners
     Runner(runner::RunnerCommand),
-    /// Search repos, issues, users
+    /// Search repos, issues, PRs, users
     Search(search::SearchCommand),
     /// Manage repository secrets
     Secret(secret::SecretCommand),

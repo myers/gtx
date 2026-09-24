@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::Milestone;
 use crate::issues::{atty_check, relative_time};
 use crate::paginate;
 use crate::repo;
@@ -55,9 +57,8 @@ struct ViewArgs {
     /// Milestone ID
     id: i64,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -98,12 +99,25 @@ impl MilestoneCommand {
     }
 }
 
-const MILESTONE_FIELDS: &[&str] = &[
-    "id", "title", "description", "state", "open_issues", "closed_issues",
-    "due_on", "created_at", "updated_at", "closed_at",
+/// `milestone list/view --json` fields (gtx-only commands; the names of gh's
+/// nested milestone object, plus Gitea's counts).
+const MILESTONE_FIELDS: &[Field<Milestone>] = &[
+    field("closedAt", |m| gh::time(m.closed_at)),
+    field("closedIssues", |m| gh::v(m.closed_issues.unwrap_or(0))),
+    field("createdAt", |m| gh::time(m.created_at)),
+    field("description", |m| gh::v(m.description.as_deref().unwrap_or(""))),
+    field("dueOn", |m| gh::time(m.due_on)),
+    field("number", |m| gh::v(m.id)),
+    field("openIssues", |m| gh::v(m.open_issues.unwrap_or(0))),
+    field("state", |m| {
+        gh::v(if matches!(m.state, Some(gitea_api::types::StateType::Closed)) { "CLOSED" } else { "OPEN" })
+    }),
+    field("title", |m| gh::v(&m.title)),
+    field("updatedAt", |m| gh::time(m.updated_at)),
 ];
 
 async fn list_milestones(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(MILESTONE_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -136,8 +150,8 @@ async fn list_milestones(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<
     })
     .await?;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &milestones, &MILESTONE_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&milestones);
     }
 
     if milestones.is_empty() {
@@ -208,6 +222,7 @@ async fn create_milestone(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Resu
 }
 
 async fn view_milestone(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(MILESTONE_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -224,9 +239,8 @@ async fn view_milestone(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<(
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&ms)?);
-        return Ok(());
+    if let Some(json) = json {
+        return json.write_one(&ms);
     }
 
     let id = ms.id.unwrap_or(0);

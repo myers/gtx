@@ -4,8 +4,9 @@ use gitea_api::types::ActionRunner;
 use url::Url;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
 use crate::issues::atty_check;
-use crate::json::{JsonArgs, write_json};
+use crate::json::JsonArgs;
 use crate::repo;
 
 #[derive(Args, Default)]
@@ -81,9 +82,8 @@ struct ViewArgs {
     /// Runner ID
     id: i64,
 
-    /// Output raw JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 
     #[command(flatten)]
     scope: ScopeArgs,
@@ -119,17 +119,24 @@ impl RunnerCommand {
     }
 }
 
-const RUNNER_FIELDS: &[&str] = &[
-    "id",
-    "name",
-    "status",
-    "busy",
-    "disabled",
-    "ephemeral",
-    "labels",
+/// `runner list/view --json` fields (gtx-only commands; camelCase like the
+/// rest).
+const RUNNER_FIELDS: &[Field<ActionRunner>] = &[
+    field("busy", |r| gh::v(r.busy.unwrap_or(false))),
+    field("disabled", |r| gh::v(r.disabled.unwrap_or(false))),
+    field("ephemeral", |r| gh::v(r.ephemeral.unwrap_or(false))),
+    field("id", |r| gh::v(r.id)),
+    field("labels", |r| {
+        serde_json::Value::Array(
+            r.labels.iter().map(|l| serde_json::json!({"id": l.id, "name": l.name, "type": l.type_})).collect(),
+        )
+    }),
+    field("name", |r| gh::v(&r.name)),
+    field("status", |r| gh::v(&r.status)),
 ];
 
 async fn list_runners(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(RUNNER_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let scope = resolve_scope(&args.scope, repo_args, &config.url)?;
@@ -161,8 +168,8 @@ async fn list_runners(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()>
             .runners,
     };
 
-    if args.json.is_json() {
-        return write_json(&args.json, &runners, RUNNER_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&runners);
     }
 
     if runners.is_empty() {
@@ -191,6 +198,7 @@ async fn list_runners(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()>
 }
 
 async fn view_runner(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(RUNNER_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let scope = resolve_scope(&args.scope, repo_args, &config.url)?;
@@ -223,9 +231,8 @@ async fn view_runner(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> 
             .into_inner(),
     };
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&runner)?);
-        return Ok(());
+    if let Some(json) = json {
+        return json.write_one(&runner);
     }
 
     let name = runner.name.as_deref().unwrap_or("(unnamed)");

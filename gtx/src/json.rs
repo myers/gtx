@@ -1,6 +1,5 @@
 use clap::Args;
 use eyre::Result;
-use serde::Serialize;
 
 /// Shared `--json` and `--jq` flags.
 #[derive(Args, Clone, Default, Debug)]
@@ -16,11 +15,6 @@ pub struct JsonArgs {
 }
 
 impl JsonArgs {
-    /// Returns true if JSON output was requested.
-    pub fn is_json(&self) -> bool {
-        self.json.is_some()
-    }
-
     /// Check the requested `--json` fields against `fields`, the way gh does:
     /// bare `--json` lists the available fields and an unknown field is an
     /// error, both before anything is fetched. `Ok(None)` means no JSON was
@@ -96,17 +90,25 @@ impl<T> Selection<'_, T> {
     fn write(&self, value: &serde_json::Value) -> Result<()> {
         match &self.jq {
             Some(expr) => print_jq(value, expr),
-            None => {
-                println!("{}", serde_json::to_string_pretty(value)?);
-                Ok(())
-            }
+            None => print_json(value),
         }
     }
 }
 
+/// Print JSON the way gh does: indented on a terminal, one compact line
+/// otherwise (so pipes get one value per line).
+pub fn print_json(value: &serde_json::Value) -> Result<()> {
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        println!("{}", serde_json::to_string(value)?);
+    }
+    Ok(())
+}
+
 /// Value helpers for [`Field`] getters: gh's shapes for common Gitea data.
 pub mod gh {
-    use gitea_api::types::{Label, Milestone, User};
+    use gitea_api::types::{Comment, Label, Milestone, User};
     use serde_json::{Value, json};
 
     /// `Option<T>` (or anything serializable) as JSON, `null` when absent.
@@ -132,6 +134,42 @@ pub mod gh {
         Value::Array(us.iter().map(|u| user(Some(u))).collect())
     }
 
+    /// gh's comment/review author: just `{login}`.
+    pub fn author(u: Option<&User>) -> Value {
+        u.map_or(Value::Null, |u| json!({"login": u.login}))
+    }
+
+    /// A user the way gh's REST-backed commands (`gh search`) print one.
+    /// Gitea has no bot flag or user type, so those are fixed.
+    pub fn rest_user(u: Option<&User>) -> Value {
+        u.map_or(Value::Null, |u| {
+            json!({"id": u.id, "is_bot": false, "login": u.login, "type": "User", "url": u.html_url.as_deref().unwrap_or("")})
+        })
+    }
+
+    /// gh's issue/PR `comments` array.
+    pub fn comments(cs: &[Comment]) -> Value {
+        Value::Array(
+            cs.iter()
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "author": author(c.user.as_ref()),
+                        "body": c.body.as_deref().unwrap_or(""),
+                        "createdAt": time(c.created_at),
+                        "includesCreatedEdit": c.updated_at.is_some() && c.updated_at != c.created_at,
+                        "url": c.html_url,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// A repository as `{name, nameWithOwner}`, the way gh nests one.
+    pub fn repo_ref(name: Option<&str>, full_name: Option<&str>) -> Value {
+        json!({"name": name, "nameWithOwner": full_name})
+    }
+
     /// gh's label object: `{id, name, description, color}`.
     pub fn labels(ls: &[Label]) -> Value {
         Value::Array(
@@ -146,81 +184,6 @@ pub mod gh {
         m.map_or(Value::Null, |m| {
             json!({"number": m.id, "title": m.title, "description": m.description.as_deref().unwrap_or(""), "dueOn": time(m.due_on)})
         })
-    }
-}
-
-/// Write items as JSON, optionally filtering to specific fields and applying jq.
-///
-/// `available_fields` is the whitelist of valid field names for this command.
-/// If the user passes `--json help`, prints the available fields and returns Ok.
-/// If no field names given (bare `--json`), dumps the full object.
-pub fn write_json<T: Serialize>(
-    args: &JsonArgs,
-    items: &[T],
-    available_fields: &[&str],
-) -> Result<()> {
-    write_json_value(args, serde_json::to_value(items)?, available_fields)
-}
-
-fn write_json_value(
-    args: &JsonArgs,
-    full: serde_json::Value,
-    available_fields: &[&str],
-) -> Result<()> {
-    let fields = match &args.json {
-        Some(f) if !f.is_empty() => f,
-        _ => {
-            // Bare --json with no fields: dump full objects
-            return write_and_filter(args, &full);
-        }
-    };
-
-    // --json help: list available fields
-    if fields.len() == 1 && fields[0] == "help" {
-        eprintln!("Available JSON fields:");
-        for f in available_fields {
-            eprintln!("  {f}");
-        }
-        return Ok(());
-    }
-
-    // Validate requested fields
-    for f in fields {
-        if !available_fields.contains(&f.as_str()) {
-            eyre::bail!(
-                "Unknown field: {f}\nAvailable fields: {}",
-                available_fields.join(", ")
-            );
-        }
-    }
-
-    let filtered = filter_fields(&full, fields);
-    write_and_filter(args, &filtered)
-}
-
-/// Keep only `fields` of an object, or of each object in an array.
-fn filter_fields(value: &serde_json::Value, fields: &[String]) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(|item| filter_fields(item, fields)).collect())
-        }
-        serde_json::Value::Object(obj) => serde_json::Value::Object(
-            fields
-                .iter()
-                .filter_map(|f| Some((f.clone(), obj.get(f.as_str())?.clone())))
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
-
-/// Pretty-print JSON, optionally applying jq filter.
-fn write_and_filter(args: &JsonArgs, value: &serde_json::Value) -> Result<()> {
-    if let Some(ref expr) = args.jq_expr {
-        print_jq(value, expr)
-    } else {
-        println!("{}", serde_json::to_string_pretty(value)?);
-        Ok(())
     }
 }
 

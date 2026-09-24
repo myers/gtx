@@ -3,7 +3,7 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::json::{Field, field, gh};
-use gitea_api::types::{PrBranchInfo, PullRequest, StateType};
+use gitea_api::types::{PrBranchInfo, PullRequest, PullReview, StateType};
 use crate::issues::{atty_check, relative_time};
 use crate::paginate;
 use crate::repo;
@@ -70,9 +70,8 @@ struct ViewArgs {
     #[arg(short, long)]
     comments: bool,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -159,9 +158,8 @@ struct ChecksArgs {
     /// PR number
     number: i64,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -240,9 +238,12 @@ fn branch_name(b: Option<&PrBranchInfo>) -> serde_json::Value {
     gh::v(b.and_then(|b| b.label.as_deref().or(b.ref_.as_deref())))
 }
 
-/// gh's `pr list --json` fields that Gitea's pull request data can answer.
-/// Gitea has no GraphQL node IDs, so `id` is the numeric ID.
-const PR_FIELDS: &[Field<PullRequest>] = &[
+/// gh's `pr list/view --json` fields that Gitea's pull request data can
+/// answer, plus any `$extra` fields. Gitea has no GraphQL node IDs, so `id`
+/// is the numeric ID. A macro so the same getters serve `PullRequest` and
+/// [`PrView`] (which derefs to `PullRequest`).
+macro_rules! pr_fields {
+    ($($extra:expr),* $(,)?) => { &[
     field("additions", |p| gh::v(p.additions)),
     field("assignees", |p| gh::users(&p.assignees)),
     field("author", |p| gh::user(p.user.as_ref())),
@@ -300,6 +301,136 @@ const PR_FIELDS: &[Field<PullRequest>] = &[
     field("title", |p| gh::v(&p.title)),
     field("updatedAt", |p| gh::time(p.updated_at)),
     field("url", |p| gh::v(&p.html_url)),
+    $($extra),*
+    ] };
+}
+
+const PR_FIELDS: &[Field<PullRequest>] = pr_fields!();
+
+/// A pull request plus what `pr view --json` may fetch besides it.
+#[derive(Default)]
+struct PrView {
+    pr: PullRequest,
+    comments: Vec<gitea_api::types::Comment>,
+    commits: Vec<gitea_api::types::Commit>,
+    files: Vec<gitea_api::types::ChangedFile>,
+    reviews: Vec<PullReview>,
+}
+
+impl std::ops::Deref for PrView {
+    type Target = PullRequest;
+    fn deref(&self) -> &PullRequest {
+        &self.pr
+    }
+}
+
+const PR_VIEW_FIELDS: &[Field<PrView>] = pr_fields![
+    field("comments", |v| gh::comments(&v.comments)),
+    field("commits", |v| serde_json::Value::Array(v.commits.iter().map(gh_commit).collect())),
+    field("files", |v| {
+        serde_json::Value::Array(
+            v.files
+                .iter()
+                .map(|f| serde_json::json!({"path": f.filename, "additions": f.additions, "deletions": f.deletions}))
+                .collect(),
+        )
+    }),
+    field("latestReviews", |v| {
+        serde_json::Value::Array(latest_reviews(&v.reviews).into_iter().map(gh_review).collect())
+    }),
+    field("reviews", |v| {
+        serde_json::Value::Array(submitted_reviews(&v.reviews).map(gh_review).collect())
+    }),
+];
+
+/// gh's commit object for `pr view --json commits`.
+fn gh_commit(c: &gitea_api::types::Commit) -> serde_json::Value {
+    let rc = c.commit.as_ref();
+    let message = rc.and_then(|m| m.message.as_deref()).unwrap_or("");
+    let (headline, body) = message.split_once('\n').unwrap_or((message, ""));
+    let date = |u: Option<&gitea_api::types::CommitUser>| {
+        u.and_then(|u| u.date.as_deref())
+            .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+            .map_or(serde_json::Value::Null, |d| gh::time(Some(d.to_utc())))
+    };
+    let author = rc.and_then(|m| m.author.as_ref());
+    let login = c.author.as_ref();
+    serde_json::json!({
+        "oid": c.sha,
+        "messageHeadline": headline.trim_end(),
+        "messageBody": body.trim(),
+        "authoredDate": date(author),
+        "committedDate": date(rc.and_then(|m| m.committer.as_ref())),
+        "authors": [{
+            "email": author.and_then(|a| a.email.as_deref()).unwrap_or(""),
+            "id": login.and_then(|u| u.id),
+            "login": login.and_then(|u| u.login.as_deref()).unwrap_or(""),
+            "name": author.and_then(|a| a.name.as_deref()).unwrap_or(""),
+        }],
+    })
+}
+
+/// gh's review state names for Gitea's, or `None` for Gitea's
+/// review-request placeholders, which gh doesn't count as reviews.
+fn gh_review_state(r: &PullReview) -> Option<&'static str> {
+    use gitea_api::types::ReviewStateType as S;
+    if r.dismissed.unwrap_or(false) {
+        return Some("DISMISSED");
+    }
+    match r.state.as_ref()? {
+        S::Approved => Some("APPROVED"),
+        S::Pending => Some("PENDING"),
+        S::Comment => Some("COMMENTED"),
+        S::RequestChanges => Some("CHANGES_REQUESTED"),
+        S::RequestReview => None,
+    }
+}
+
+fn submitted_reviews(rs: &[PullReview]) -> impl Iterator<Item = &PullReview> {
+    rs.iter().filter(|r| gh_review_state(r).is_some())
+}
+
+/// Each reviewer's most recent review, in review order.
+fn latest_reviews(rs: &[PullReview]) -> Vec<&PullReview> {
+    let mut latest: Vec<&PullReview> = Vec::new();
+    for r in submitted_reviews(rs) {
+        let who = r.user.as_ref().and_then(|u| u.id);
+        latest.retain(|l| l.user.as_ref().and_then(|u| u.id) != who);
+        latest.push(r);
+    }
+    latest
+}
+
+fn gh_review(r: &PullReview) -> serde_json::Value {
+    serde_json::json!({
+        "id": r.id,
+        "author": gh::author(r.user.as_ref()),
+        "body": r.body.as_deref().unwrap_or(""),
+        "state": gh_review_state(r),
+        "submittedAt": gh::time(r.submitted_at),
+        "commit": {"oid": r.commit_id},
+    })
+}
+
+/// gh's `pr checks --json` fields, from Gitea's commit statuses.
+const CHECK_FIELDS: &[Field<gitea_api::types::CommitStatus>] = &[
+    field("bucket", |s| {
+        use gitea_api::types::CommitStatusState as S;
+        gh::v(match s.status {
+            Some(S::Success) => "pass",
+            Some(S::Failure | S::Error) => "fail",
+            Some(S::Skipped) => "skipping",
+            _ => "pending",
+        })
+    }),
+    field("completedAt", |s| gh::time(s.updated_at)),
+    field("description", |s| gh::v(s.description.as_deref().unwrap_or(""))),
+    field("link", |s| gh::v(s.target_url.as_deref().unwrap_or(""))),
+    field("name", |s| gh::v(s.context.as_deref().unwrap_or(""))),
+    field("startedAt", |s| gh::time(s.created_at)),
+    field("state", |s| {
+        gh::v(s.status.as_ref().map(|st| gh::v(st).as_str().unwrap_or("").to_uppercase()))
+    }),
 ];
 
 async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
@@ -389,6 +520,7 @@ async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
 }
 
 async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(PR_VIEW_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -405,26 +537,81 @@ async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        if args.comments {
-            let comments = api
+    if let Some(json) = json {
+        let n = args.number;
+        let mut view = PrView { pr, ..Default::default() };
+        let api_err = |e| eyre::eyre!("{}", gitea_api::GiteaError::from(e));
+        if json.wants("comments") {
+            view.comments = api
                 .issue_get_comments()
                 .owner(owner)
                 .repo(repo)
-                .index(args.number)
+                .index(n)
                 .send()
                 .await
-                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .map_err(api_err)?
                 .into_inner();
-            let combined = serde_json::json!({
-                "pr": pr,
-                "comments": comments,
-            });
-            println!("{}", serde_json::to_string_pretty(&combined)?);
-        } else {
-            println!("{}", serde_json::to_string_pretty(&pr)?);
         }
-        return Ok(());
+        if json.wants("commits") {
+            view.commits = paginate::paginate(10_000, 50, |page, limit| {
+                let api = &api;
+                async move {
+                    Ok(api
+                        .repo_get_pull_request_commits()
+                        .owner(owner)
+                        .repo(repo)
+                        .index(n)
+                        .files(false)
+                        .verification(false)
+                        .page(page)
+                        .limit(limit)
+                        .send()
+                        .await
+                        .map_err(api_err)?
+                        .into_inner())
+                }
+            })
+            .await?;
+        }
+        if json.wants("files") {
+            view.files = paginate::paginate(10_000, 50, |page, limit| {
+                let api = &api;
+                async move {
+                    Ok(api
+                        .repo_get_pull_request_files()
+                        .owner(owner)
+                        .repo(repo)
+                        .index(n)
+                        .page(page)
+                        .limit(limit)
+                        .send()
+                        .await
+                        .map_err(api_err)?
+                        .into_inner())
+                }
+            })
+            .await?;
+        }
+        if json.wants("reviews") || json.wants("latestReviews") {
+            view.reviews = paginate::paginate(10_000, 50, |page, limit| {
+                let api = &api;
+                async move {
+                    Ok(api
+                        .repo_list_pull_reviews()
+                        .owner(owner)
+                        .repo(repo)
+                        .index(n)
+                        .page(page)
+                        .limit(limit)
+                        .send()
+                        .await
+                        .map_err(api_err)?
+                        .into_inner())
+                }
+            })
+            .await?;
+        }
+        return json.write_one(&view);
     }
 
     let number = pr.number.unwrap_or(0);
@@ -804,6 +991,7 @@ async fn review_pr(repo_args: &repo::RepoArgs, args: &ReviewArgs) -> Result<()> 
 }
 
 async fn checks_pr(repo_args: &repo::RepoArgs, args: &ChecksArgs) -> Result<()> {
+    let json = args.json.select(CHECK_FIELDS)?;
     let config = Config::load()?;
 
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -837,9 +1025,8 @@ async fn checks_pr(repo_args: &repo::RepoArgs, args: &ChecksArgs) -> Result<()> 
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&combined)?);
-        return Ok(());
+    if let Some(json) = json {
+        return json.write_list(&combined.statuses);
     }
 
     let state = combined.state.as_ref().map(|s| format!("{s:?}")).unwrap_or_else(|| "unknown".to_string()).to_lowercase();

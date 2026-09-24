@@ -35,7 +35,7 @@ pub struct ApiCommand {
     silent: bool,
 
     /// Filter JSON output with a jq expression
-    #[arg(long = "jq", value_name = "EXPR")]
+    #[arg(short = 'q', long = "jq", value_name = "EXPR")]
     jq_expr: Option<String>,
 
     /// Make additional requests to fetch all pages
@@ -238,9 +238,9 @@ impl ApiCommand {
             let parsed: serde_json::Value = serde_json::from_str(text)?;
             crate::json::print_jq(&parsed, expr)?;
         } else {
-            // Pretty-print JSON, or raw if not JSON
+            // JSON as gh prints it (indented only on a terminal), or raw if not JSON
             match serde_json::from_str::<serde_json::Value>(text) {
-                Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+                Ok(v) => crate::json::print_json(&v)?,
                 Err(_) => print!("{text}"),
             }
         }

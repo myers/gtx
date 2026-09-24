@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::GpgKey;
 use crate::issues::{atty_check, relative_time};
 
 #[derive(Args)]
@@ -48,12 +50,30 @@ impl GpgKeyCommand {
     }
 }
 
-const KEY_FIELDS: &[&str] = &[
-    "id", "key_id", "emails", "can_sign", "can_certify",
-    "can_encrypt_comms", "can_encrypt_storage", "expires_at", "created_at",
+/// `gpg-key list --json` fields (gh's `gpg-key list` has no `--json`;
+/// camelCase like the rest).
+const KEY_FIELDS: &[Field<GpgKey>] = &[
+    field("canCertify", |k| gh::v(k.can_certify.unwrap_or(false))),
+    field("canEncryptComms", |k| gh::v(k.can_encrypt_comms.unwrap_or(false))),
+    field("canEncryptStorage", |k| gh::v(k.can_encrypt_storage.unwrap_or(false))),
+    field("canSign", |k| gh::v(k.can_sign.unwrap_or(false))),
+    field("createdAt", |k| gh::time(k.created_at)),
+    field("emails", |k| {
+        serde_json::Value::Array(
+            k.emails
+                .iter()
+                .map(|e| serde_json::json!({"email": e.email, "verified": e.verified.unwrap_or(false)}))
+                .collect(),
+        )
+    }),
+    field("expiresAt", |k| gh::time(k.expires_at)),
+    field("id", |k| gh::v(k.id)),
+    field("keyId", |k| gh::v(&k.key_id)),
+    field("verified", |k| gh::v(k.verified.unwrap_or(false))),
 ];
 
 async fn list_keys(args: &ListArgs) -> Result<()> {
+    let json = args.json.select(KEY_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -64,8 +84,8 @@ async fn list_keys(args: &ListArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &keys, KEY_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&keys);
     }
 
     if keys.is_empty() {

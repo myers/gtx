@@ -86,9 +86,8 @@ struct ViewArgs {
     #[arg(short, long)]
     comments: bool,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -194,9 +193,12 @@ fn issue_closed(i: &Issue) -> bool {
     matches!(i.state, Some(StateType::Closed))
 }
 
-/// gh's `issue list --json` fields that Gitea's issue data can answer.
-/// Gitea has no GraphQL node IDs, so `id` is the numeric ID.
-const ISSUE_FIELDS: &[Field<Issue>] = &[
+/// gh's `issue list/view --json` fields that Gitea's issue data can answer,
+/// plus any `$extra` fields. Gitea has no GraphQL node IDs, so `id` is the
+/// numeric ID. A macro so the same getters serve `Issue` and [`IssueView`]
+/// (which derefs to `Issue`).
+macro_rules! issue_fields {
+    ($($extra:expr),* $(,)?) => { &[
     field("assignees", |i| gh::users(&i.assignees)),
     field("author", |i| gh::user(i.user.as_ref())),
     field("body", |i| gh::v(i.body.as_deref().unwrap_or(""))),
@@ -212,7 +214,27 @@ const ISSUE_FIELDS: &[Field<Issue>] = &[
     field("title", |i| gh::v(&i.title)),
     field("updatedAt", |i| gh::time(i.updated_at)),
     field("url", |i| gh::v(&i.html_url)),
-];
+    $($extra),*
+    ] };
+}
+
+const ISSUE_FIELDS: &[Field<Issue>] = issue_fields!();
+
+/// An issue plus what `issue view --json` may fetch besides it.
+struct IssueView {
+    issue: Issue,
+    comments: Vec<gitea_api::types::Comment>,
+}
+
+impl std::ops::Deref for IssueView {
+    type Target = Issue;
+    fn deref(&self) -> &Issue {
+        &self.issue
+    }
+}
+
+const ISSUE_VIEW_FIELDS: &[Field<IssueView>] =
+    issue_fields![field("comments", |v| gh::comments(&v.comments))];
 
 async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let json = args.json.select(ISSUE_FIELDS)?;
@@ -307,6 +329,7 @@ async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
 }
 
 async fn view_issue(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(ISSUE_VIEW_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -323,26 +346,20 @@ async fn view_issue(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        if args.comments {
-            let comments = api
-                .issue_get_comments()
+    if let Some(json) = json {
+        let comments = if json.wants("comments") {
+            api.issue_get_comments()
                 .owner(owner)
                 .repo(repo)
                 .index(args.number)
                 .send()
                 .await
                 .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-                .into_inner();
-            let combined = serde_json::json!({
-                "issue": issue,
-                "comments": comments,
-            });
-            println!("{}", serde_json::to_string_pretty(&combined)?);
+                .into_inner()
         } else {
-            println!("{}", serde_json::to_string_pretty(&issue)?);
-        }
-        return Ok(());
+            Vec::new()
+        };
+        return json.write_one(&IssueView { issue, comments });
     }
 
     // Header: title and number

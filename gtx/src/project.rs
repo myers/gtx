@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::{Project, ProjectColumn};
 use crate::issues::atty_check;
 use crate::repo;
 
@@ -53,8 +55,8 @@ struct ListArgs {
 #[derive(Args)]
 struct ViewArgs {
     id: i64,
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -102,11 +104,24 @@ impl ProjectCommand {
     }
 }
 
-const PROJECT_FIELDS: &[&str] = &[
-    "id", "title", "description", "state", "created_at", "updated_at", "closed_at",
+/// `project list/view --json` fields (Gitea's repo projects, which gh's
+/// `project` doesn't model; camelCase like the rest).
+const PROJECT_FIELDS: &[Field<Project>] = &[
+    field("closedAt", |p| gh::time(p.closed_at)),
+    field("closedIssues", |p| gh::v(p.closed_issues.unwrap_or(0))),
+    field("createdAt", |p| gh::time(p.created_at)),
+    field("description", |p| gh::v(p.description.as_deref().unwrap_or(""))),
+    field("id", |p| gh::v(p.id)),
+    field("openIssues", |p| gh::v(p.open_issues.unwrap_or(0))),
+    field("state", |p| {
+        gh::v(if matches!(p.state, Some(gitea_api::types::StateType::Closed)) { "CLOSED" } else { "OPEN" })
+    }),
+    field("title", |p| gh::v(&p.title)),
+    field("updatedAt", |p| gh::time(p.updated_at)),
 ];
 
 async fn list_projects(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(PROJECT_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -122,8 +137,8 @@ async fn list_projects(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &projects, &PROJECT_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&projects);
     }
 
     if projects.is_empty() {
@@ -147,6 +162,7 @@ async fn list_projects(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()
 }
 
 async fn view_project(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(PROJECT_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -161,9 +177,8 @@ async fn view_project(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()>
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&project)?);
-        return Ok(());
+    if let Some(json) = json {
+        return json.write_one(&project);
     }
 
     let title = project.title.as_deref().unwrap_or("(no title)");
@@ -236,9 +251,19 @@ async fn set_project_state(repo_args: &repo::RepoArgs, args: &StateArgs, close: 
     Ok(())
 }
 
-const COLUMN_FIELDS: &[&str] = &["id", "title", "color"];
+/// `project column list --json` fields.
+const COLUMN_FIELDS: &[Field<ProjectColumn>] = &[
+    field("color", |c| gh::v(c.color.as_deref().unwrap_or(""))),
+    field("createdAt", |c| gh::time(c.created_at)),
+    field("id", |c| gh::v(c.id)),
+    field("isDefault", |c| gh::v(c.default.unwrap_or(false))),
+    field("sorting", |c| gh::v(c.sorting)),
+    field("title", |c| gh::v(&c.title)),
+    field("updatedAt", |c| gh::time(c.updated_at)),
+];
 
 async fn list_columns(repo_args: &repo::RepoArgs, args: &ColumnListArgs) -> Result<()> {
+    let json = args.json.select(COLUMN_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -253,8 +278,8 @@ async fn list_columns(repo_args: &repo::RepoArgs, args: &ColumnListArgs) -> Resu
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &columns, &COLUMN_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&columns);
     }
 
     if columns.is_empty() {

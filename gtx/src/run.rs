@@ -216,8 +216,8 @@ struct ListArgs {
 #[derive(Args)]
 struct ViewArgs {
     id: i64,
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -287,7 +287,10 @@ fn run_workflow_name(run: &ActionWorkflowRun) -> Option<&str> {
 /// numeric workflow ID: `createdAt` is when the run started, `updatedAt`
 /// when it completed (or started), and `name`/`workflowName` are the
 /// workflow's file name.
-const RUN_FIELDS: &[Field<ActionWorkflowRun>] = &[
+/// gh's `run list/view --json` fields, plus any `$extra` fields. A macro so
+/// the same getters serve `ActionWorkflowRun` and [`RunView`].
+macro_rules! run_fields {
+    ($($extra:expr),* $(,)?) => { &[
     field("attempt", |r| gh::v(r.run_attempt)),
     field("conclusion", |r| gh::v(r.conclusion.as_deref().unwrap_or(""))),
     field("createdAt", |r| gh::time(r.started_at)),
@@ -303,7 +306,56 @@ const RUN_FIELDS: &[Field<ActionWorkflowRun>] = &[
     field("updatedAt", |r| gh::time(r.completed_at.or(r.started_at))),
     field("url", |r| gh::v(&r.html_url)),
     field("workflowName", |r| gh::v(run_workflow_name(r))),
-];
+    $($extra),*
+    ] };
+}
+
+const RUN_FIELDS: &[Field<ActionWorkflowRun>] = run_fields!();
+
+/// A run plus its jobs, fetched only when `run view --json jobs` asks.
+struct RunView {
+    run: ActionWorkflowRun,
+    jobs: Vec<gitea_api::types::ActionWorkflowJob>,
+}
+
+impl std::ops::Deref for RunView {
+    type Target = ActionWorkflowRun;
+    fn deref(&self) -> &ActionWorkflowRun {
+        &self.run
+    }
+}
+
+const RUN_VIEW_FIELDS: &[Field<RunView>] = run_fields![field("jobs", |v| {
+    serde_json::Value::Array(v.jobs.iter().map(gh_job).collect())
+})];
+
+/// gh's job object for `run view --json jobs`.
+fn gh_job(j: &gitea_api::types::ActionWorkflowJob) -> serde_json::Value {
+    let steps: Vec<_> = j
+        .steps
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "completedAt": gh::time(s.completed_at),
+                "conclusion": s.conclusion.as_deref().unwrap_or(""),
+                "name": s.name,
+                "number": s.number,
+                "startedAt": gh::time(s.started_at),
+                "status": s.status,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "completedAt": gh::time(j.completed_at),
+        "conclusion": j.conclusion.as_deref().unwrap_or(""),
+        "databaseId": j.id,
+        "name": j.name,
+        "startedAt": gh::time(j.started_at),
+        "status": j.status,
+        "steps": steps,
+        "url": j.html_url,
+    })
+}
 
 /// Workflow runs carry `path` = `<workflow file>@<ref>`. Match a `--workflow`
 /// argument given either as the bare file name or as a path to it.
@@ -420,6 +472,7 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
 }
 
 async fn view_run(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(RUN_VIEW_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -434,9 +487,21 @@ async fn view_run(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&run)?);
-        return Ok(());
+    if let Some(json) = json {
+        let jobs = if json.wants("jobs") {
+            api.list_workflow_run_jobs()
+                .owner(&repo_info.owner)
+                .repo(&repo_info.name)
+                .run(args.id)
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner()
+                .jobs
+        } else {
+            Vec::new()
+        };
+        return json.write_one(&RunView { run, jobs });
     }
 
     let title = run.display_title.as_deref().unwrap_or("(unnamed)");

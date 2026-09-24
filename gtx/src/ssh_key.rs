@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::PublicKey;
 use crate::issues::{atty_check, relative_time};
 
 #[derive(Args)]
@@ -52,11 +54,22 @@ impl SshKeyCommand {
     }
 }
 
-const KEY_FIELDS: &[&str] = &[
-    "id", "title", "key", "fingerprint", "key_type", "read_only", "created_at",
+/// `ssh-key list --json` fields (gh's `ssh-key list` has no `--json`;
+/// camelCase like the rest).
+const KEY_FIELDS: &[Field<PublicKey>] = &[
+    field("createdAt", |k| gh::time(k.created_at)),
+    field("fingerprint", |k| gh::v(&k.fingerprint)),
+    field("id", |k| gh::v(k.id)),
+    field("key", |k| gh::v(&k.key)),
+    field("keyType", |k| gh::v(&k.key_type)),
+    field("lastUsedAt", |k| gh::time(k.last_used_at)),
+    field("readOnly", |k| gh::v(k.read_only.unwrap_or(false))),
+    field("title", |k| gh::v(&k.title)),
+    field("url", |k| gh::v(&k.url)),
 ];
 
 async fn list_keys(args: &ListArgs) -> Result<()> {
+    let json = args.json.select(KEY_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -67,8 +80,8 @@ async fn list_keys(args: &ListArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &keys, KEY_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&keys);
     }
 
     if keys.is_empty() {

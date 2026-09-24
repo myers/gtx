@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::Organization;
 use crate::issues::atty_check;
 use crate::paginate;
 
@@ -47,9 +49,8 @@ struct ViewArgs {
     /// Organization name
     name: String,
 
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 impl OrgCommand {
@@ -62,12 +63,22 @@ impl OrgCommand {
     }
 }
 
-const ORG_FIELDS: &[&str] = &[
-    "id", "name", "full_name", "description", "website", "location",
-    "avatar_url", "visibility",
+/// `org list/view --json` fields (gtx-only commands; camelCase like the rest,
+/// with gh's `login` for the org's username and `name` for its full name).
+const ORG_FIELDS: &[Field<Organization>] = &[
+    field("avatarUrl", |o| gh::v(&o.avatar_url)),
+    field("description", |o| gh::v(o.description.as_deref().unwrap_or(""))),
+    field("email", |o| gh::v(o.email.as_deref().unwrap_or(""))),
+    field("id", |o| gh::v(o.id)),
+    field("location", |o| gh::v(o.location.as_deref().unwrap_or(""))),
+    field("login", |o| gh::v(&o.username)),
+    field("name", |o| gh::v(o.full_name.as_deref().unwrap_or(""))),
+    field("visibility", |o| gh::v(&o.visibility)),
+    field("website", |o| gh::v(o.website.as_deref().unwrap_or(""))),
 ];
 
 async fn list_orgs(args: &ListArgs) -> Result<()> {
+    let json = args.json.select(ORG_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -86,8 +97,8 @@ async fn list_orgs(args: &ListArgs) -> Result<()> {
     })
     .await?;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &orgs, &ORG_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&orgs);
     }
 
     if orgs.is_empty() {
@@ -116,6 +127,7 @@ async fn list_orgs(args: &ListArgs) -> Result<()> {
 }
 
 async fn view_org(args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(ORG_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -127,9 +139,8 @@ async fn view_org(args: &ViewArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&org)?);
-        return Ok(());
+    if let Some(json) = json {
+        return json.write_one(&org);
     }
 
     let name = org.username.as_deref().unwrap_or("(unknown)");

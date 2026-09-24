@@ -3,7 +3,7 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::json::{Field, field, gh};
-use gitea_api::types::DeployKey;
+use gitea_api::types::{DeployKey, Repository};
 use crate::issues::{atty_check, relative_time};
 use crate::paginate;
 use crate::repo;
@@ -45,9 +45,8 @@ enum RepoAction {
 
 #[derive(Args)]
 struct ViewArgs {
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
+    #[command(flatten)]
+    json: crate::json::JsonArgs,
 }
 
 #[derive(Args)]
@@ -185,6 +184,7 @@ impl RepoCommand {
 }
 
 async fn view_repo(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(REPO_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -199,9 +199,8 @@ async fn view_repo(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&repo_data)?);
-        return Ok(());
+    if let Some(json) = json {
+        return json.write_one(&repo_data);
     }
 
     let name = repo_data.full_name.as_deref().unwrap_or("");
@@ -230,13 +229,81 @@ async fn view_repo(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     Ok(())
 }
 
-const REPO_FIELDS: &[&str] = &[
-    "id", "name", "full_name", "description", "private", "fork", "archived",
-    "stars_count", "forks_count", "open_issues_count", "default_branch",
-    "created_at", "updated_at", "html_url", "clone_url", "ssh_url",
+fn owner_ref(u: Option<&gitea_api::types::User>) -> serde_json::Value {
+    u.map_or(serde_json::Value::Null, |u| serde_json::json!({"id": u.id, "login": u.login}))
+}
+
+/// gh's `repo view/list --json` fields that Gitea's repository data can
+/// answer. Gitea has no GraphQL node IDs, so `id` is the numeric ID.
+const REPO_FIELDS: &[Field<Repository>] = &[
+    field("archivedAt", |r| gh::time(r.archived_at.filter(|_| r.archived.unwrap_or(false)))),
+    field("createdAt", |r| gh::time(r.created_at)),
+    field("defaultBranchRef", |r| serde_json::json!({"name": r.default_branch.as_deref().unwrap_or("")})),
+    field("deleteBranchOnMerge", |r| gh::v(r.default_delete_branch_after_merge.unwrap_or(false))),
+    field("description", |r| gh::v(r.description.as_deref().unwrap_or(""))),
+    field("diskUsage", |r| gh::v(r.size)),
+    field("forkCount", |r| gh::v(r.forks_count.unwrap_or(0))),
+    field("hasIssuesEnabled", |r| gh::v(r.has_issues.unwrap_or(false))),
+    field("hasProjectsEnabled", |r| gh::v(r.has_projects.unwrap_or(false))),
+    field("hasWikiEnabled", |r| gh::v(r.has_wiki.unwrap_or(false))),
+    field("homepageUrl", |r| gh::v(r.website.as_deref().unwrap_or(""))),
+    field("id", |r| gh::v(r.id)),
+    field("isArchived", |r| gh::v(r.archived.unwrap_or(false))),
+    field("isEmpty", |r| gh::v(r.empty.unwrap_or(false))),
+    field("isFork", |r| gh::v(r.fork.unwrap_or(false))),
+    field("isMirror", |r| gh::v(r.mirror.unwrap_or(false))),
+    field("isPrivate", |r| gh::v(r.private.unwrap_or(false))),
+    field("isTemplate", |r| gh::v(r.template.unwrap_or(false))),
+    field("mergeCommitAllowed", |r| gh::v(r.allow_merge_commits.unwrap_or(false))),
+    field("mirrorUrl", |r| gh::v(r.original_url.as_deref().filter(|_| r.mirror.unwrap_or(false)).unwrap_or(""))),
+    field("name", |r| gh::v(&r.name)),
+    field("nameWithOwner", |r| gh::v(&r.full_name)),
+    field("owner", |r| owner_ref(r.owner.as_ref())),
+    field("parent", |r| {
+        r.parent.as_ref().as_ref().map_or(serde_json::Value::Null, |p| {
+            serde_json::json!({"id": p.id, "name": p.name, "owner": owner_ref(p.owner.as_ref())})
+        })
+    }),
+    field("primaryLanguage", |r| {
+        r.language
+            .as_deref()
+            .filter(|l| !l.is_empty())
+            .map_or(serde_json::Value::Null, |l| serde_json::json!({"name": l}))
+    }),
+    field("rebaseMergeAllowed", |r| gh::v(r.allow_rebase.unwrap_or(false))),
+    field("repositoryTopics", |r| {
+        serde_json::Value::Array(r.topics.iter().map(|t| serde_json::json!({"name": t})).collect())
+    }),
+    field("squashMergeAllowed", |r| gh::v(r.allow_squash_merge.unwrap_or(false))),
+    field("sshUrl", |r| gh::v(&r.ssh_url)),
+    field("stargazerCount", |r| gh::v(r.stars_count.unwrap_or(0))),
+    field("updatedAt", |r| gh::time(r.updated_at)),
+    field("url", |r| gh::v(&r.html_url)),
+    field("viewerPermission", |r| {
+        gh::v(r.permissions.as_ref().map(|p| {
+            if p.admin.unwrap_or(false) {
+                "ADMIN"
+            } else if p.push.unwrap_or(false) {
+                "WRITE"
+            } else {
+                "READ"
+            }
+        }))
+    }),
+    field("visibility", |r| {
+        gh::v(if r.private.unwrap_or(false) {
+            "PRIVATE"
+        } else if r.internal.unwrap_or(false) {
+            "INTERNAL"
+        } else {
+            "PUBLIC"
+        })
+    }),
+    field("watchers", |r| serde_json::json!({"totalCount": r.watchers_count.unwrap_or(0)})),
 ];
 
 async fn list_repos(args: &ListArgs) -> Result<()> {
+    let json = args.json.select(REPO_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -274,8 +341,8 @@ async fn list_repos(args: &ListArgs) -> Result<()> {
         .await?
     };
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &repos, &REPO_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&repos);
     }
 
     if repos.is_empty() {

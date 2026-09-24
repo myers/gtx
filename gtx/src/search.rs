@@ -3,6 +3,8 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
+use crate::json::{Field, field, gh};
+use gitea_api::types::{Issue, IssueSearchIssuesType, Repository, StateType, User};
 
 #[derive(Args)]
 pub struct SearchCommand {
@@ -14,8 +16,10 @@ pub struct SearchCommand {
 enum SearchAction {
     /// Search repositories
     Repos(RepoSearchArgs),
-    /// Search issues and pull requests (across all repos)
+    /// Search issues (across all repos)
     Issues(IssueSearchArgs),
+    /// Search pull requests (across all repos)
+    Prs(IssueSearchArgs),
     /// Search users
     Users(UserSearchArgs),
 }
@@ -71,18 +75,50 @@ impl SearchCommand {
     pub async fn run(&self) -> Result<()> {
         match &self.action {
             SearchAction::Repos(args) => search_repos(args).await,
-            SearchAction::Issues(args) => search_issues(args).await,
+            SearchAction::Issues(args) => search_issues(args, IssueSearchIssuesType::Issues).await,
+            SearchAction::Prs(args) => search_issues(args, IssueSearchIssuesType::Pulls).await,
             SearchAction::Users(args) => search_users(args).await,
         }
     }
 }
 
-const REPO_FIELDS: &[&str] = &[
-    "id", "full_name", "description", "private", "fork", "archived",
-    "stars_count", "forks_count", "html_url", "clone_url",
+/// gh's `search repos --json` fields (REST names and shapes).
+const REPO_FIELDS: &[Field<Repository>] = &[
+    field("createdAt", |r| gh::time(r.created_at)),
+    field("defaultBranch", |r| gh::v(r.default_branch.as_deref().unwrap_or(""))),
+    field("description", |r| gh::v(r.description.as_deref().unwrap_or(""))),
+    field("forksCount", |r| gh::v(r.forks_count.unwrap_or(0))),
+    field("fullName", |r| gh::v(&r.full_name)),
+    field("hasIssues", |r| gh::v(r.has_issues.unwrap_or(false))),
+    field("hasProjects", |r| gh::v(r.has_projects.unwrap_or(false))),
+    field("hasWiki", |r| gh::v(r.has_wiki.unwrap_or(false))),
+    field("homepage", |r| gh::v(r.website.as_deref().unwrap_or(""))),
+    field("id", |r| gh::v(r.id)),
+    field("isArchived", |r| gh::v(r.archived.unwrap_or(false))),
+    field("isFork", |r| gh::v(r.fork.unwrap_or(false))),
+    field("isPrivate", |r| gh::v(r.private.unwrap_or(false))),
+    field("language", |r| gh::v(r.language.as_deref().unwrap_or(""))),
+    field("name", |r| gh::v(&r.name)),
+    field("openIssuesCount", |r| gh::v(r.open_issues_count.unwrap_or(0))),
+    field("owner", |r| gh::rest_user(r.owner.as_ref())),
+    field("size", |r| gh::v(r.size.unwrap_or(0))),
+    field("stargazersCount", |r| gh::v(r.stars_count.unwrap_or(0))),
+    field("updatedAt", |r| gh::time(r.updated_at)),
+    field("url", |r| gh::v(&r.html_url)),
+    field("visibility", |r| {
+        gh::v(if r.private.unwrap_or(false) {
+            "private"
+        } else if r.internal.unwrap_or(false) {
+            "internal"
+        } else {
+            "public"
+        })
+    }),
+    field("watchersCount", |r| gh::v(r.watchers_count.unwrap_or(0))),
 ];
 
 async fn search_repos(args: &RepoSearchArgs) -> Result<()> {
+    let json = args.json.select(REPO_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -97,8 +133,8 @@ async fn search_repos(args: &RepoSearchArgs) -> Result<()> {
 
     let repos = &result.data;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, repos, REPO_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(repos);
     }
 
     if repos.is_empty() {
@@ -151,16 +187,40 @@ async fn search_repos(args: &RepoSearchArgs) -> Result<()> {
     Ok(())
 }
 
-const ISSUE_FIELDS: &[&str] = &[
-    "number", "title", "state", "body", "labels", "repository",
-    "user", "created_at", "updated_at", "html_url",
+fn rest_users(us: &[User]) -> serde_json::Value {
+    serde_json::Value::Array(us.iter().map(|u| gh::rest_user(Some(u))).collect())
+}
+
+/// gh's `search issues/prs --json` fields (REST names and shapes).
+const ISSUE_FIELDS: &[Field<Issue>] = &[
+    field("assignees", |i| rest_users(&i.assignees)),
+    field("author", |i| gh::rest_user(i.user.as_ref())),
+    field("body", |i| gh::v(i.body.as_deref().unwrap_or(""))),
+    field("closedAt", |i| gh::time(i.closed_at)),
+    field("commentsCount", |i| gh::v(i.comments.unwrap_or(0))),
+    field("createdAt", |i| gh::time(i.created_at)),
+    field("id", |i| gh::v(i.id)),
+    field("isDraft", |i| gh::v(i.pull_request.as_ref().and_then(|p| p.draft).unwrap_or(false))),
+    field("isLocked", |i| gh::v(i.is_locked.unwrap_or(false))),
+    field("isPullRequest", |i| gh::v(i.pull_request.is_some())),
+    field("labels", |i| gh::labels(&i.labels)),
+    field("number", |i| gh::v(i.number)),
+    field("repository", |i| {
+        let r = i.repository.as_ref();
+        gh::repo_ref(r.and_then(|r| r.name.as_deref()), r.and_then(|r| r.full_name.as_deref()))
+    }),
+    field("state", |i| gh::v(if matches!(i.state, Some(StateType::Closed)) { "closed" } else { "open" })),
+    field("title", |i| gh::v(&i.title)),
+    field("updatedAt", |i| gh::time(i.updated_at)),
+    field("url", |i| gh::v(&i.html_url)),
 ];
 
-async fn search_issues(args: &IssueSearchArgs) -> Result<()> {
+async fn search_issues(args: &IssueSearchArgs, kind: IssueSearchIssuesType) -> Result<()> {
+    let json = args.json.select(ISSUE_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
-    let mut req = api.issue_search_issues().q(&args.query).limit(args.limit);
+    let mut req = api.issue_search_issues().q(&args.query).limit(args.limit).type_(kind);
 
     if let Some(ref state) = args.state {
         match state.as_str() {
@@ -180,8 +240,8 @@ async fn search_issues(args: &IssueSearchArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &issues, ISSUE_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&issues);
     }
 
     if issues.is_empty() {
@@ -236,11 +296,23 @@ async fn search_issues(args: &IssueSearchArgs) -> Result<()> {
     Ok(())
 }
 
-const USER_FIELDS: &[&str] = &[
-    "id", "login", "full_name", "email", "avatar_url", "description",
+/// `search users --json` fields (gh has no `search users`; camelCase like
+/// the rest).
+const USER_FIELDS: &[Field<User>] = &[
+    field("avatarUrl", |u| gh::v(&u.avatar_url)),
+    field("createdAt", |u| gh::time(u.created)),
+    field("description", |u| gh::v(u.description.as_deref().unwrap_or(""))),
+    field("email", |u| gh::v(u.email.as_deref().unwrap_or(""))),
+    field("id", |u| gh::v(u.id)),
+    field("location", |u| gh::v(u.location.as_deref().unwrap_or(""))),
+    field("login", |u| gh::v(&u.login)),
+    field("name", |u| gh::v(u.full_name.as_deref().unwrap_or(""))),
+    field("url", |u| gh::v(&u.html_url)),
+    field("website", |u| gh::v(u.website.as_deref().unwrap_or(""))),
 ];
 
 async fn search_users(args: &UserSearchArgs) -> Result<()> {
+    let json = args.json.select(USER_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -255,8 +327,8 @@ async fn search_users(args: &UserSearchArgs) -> Result<()> {
 
     let users = &result.data;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, users, USER_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(users);
     }
 
     if users.is_empty() {

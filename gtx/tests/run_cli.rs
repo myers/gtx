@@ -31,7 +31,7 @@ fn run_list_passes_filters_to_server() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"databaseId\": 7"));
+        .stdout(predicate::str::contains("\"databaseId\":7"));
 
     let seen = server.seen();
     assert_eq!(seen.len(), 1, "{seen:?}");

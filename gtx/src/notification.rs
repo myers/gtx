@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use serde_json::Value;
 use crate::issues::{atty_check, relative_time};
 
 #[derive(Args)]
@@ -43,11 +45,37 @@ impl NotificationCommand {
     }
 }
 
-const NOTIFICATION_FIELDS: &[&str] = &[
-    "id", "subject", "repository", "unread", "pinned", "updated_at", "url",
+fn str_at<'a>(v: &'a Value, path: &str) -> Option<&'a str> {
+    v.pointer(path).and_then(Value::as_str)
+}
+
+/// `notification list --json` fields (gtx-only command; camelCase like the
+/// rest). Built from the raw notification-thread JSON.
+const NOTIFICATION_FIELDS: &[Field<Value>] = &[
+    field("id", |n| n.get("id").cloned().unwrap_or(Value::Null)),
+    field("pinned", |n| gh::v(n.get("pinned").and_then(Value::as_bool).unwrap_or(false))),
+    field("repository", |n| gh::repo_ref(str_at(n, "/repository/name"), str_at(n, "/repository/full_name"))),
+    field("subject", |n| {
+        serde_json::json!({
+            "title": str_at(n, "/subject/title").unwrap_or(""),
+            "type": str_at(n, "/subject/type").unwrap_or(""),
+            "state": str_at(n, "/subject/state").unwrap_or(""),
+            "url": str_at(n, "/subject/html_url").unwrap_or(""),
+        })
+    }),
+    field("unread", |n| gh::v(n.get("unread").and_then(Value::as_bool).unwrap_or(false))),
+    field("updatedAt", |n| {
+        gh::time(
+            str_at(n, "/updated_at")
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.to_utc()),
+        )
+    }),
+    field("url", |n| gh::v(str_at(n, "/url"))),
 ];
 
 async fn list_notifications(args: &ListArgs) -> Result<()> {
+    let json = args.json.select(NOTIFICATION_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -60,8 +88,8 @@ async fn list_notifications(args: &ListArgs) -> Result<()> {
     let resp = api.raw_get(path).await.map_err(|e| eyre::eyre!("{e}"))?;
     let notifications: Vec<serde_json::Value> = serde_json::from_str(&resp)?;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &notifications, NOTIFICATION_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&notifications);
     }
 
     if notifications.is_empty() {
