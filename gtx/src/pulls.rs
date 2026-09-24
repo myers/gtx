@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::{PrBranchInfo, PullRequest, StateType};
 use crate::issues::{atty_check, relative_time};
 use crate::paginate;
 use crate::repo;
@@ -220,14 +222,88 @@ impl PrCommand {
     }
 }
 
-const PR_FIELDS: &[&str] = &[
-    "number", "title", "state", "body", "labels", "assignees", "milestone",
-    "head", "base", "merged", "merged_at", "mergeable", "comments",
-    "created_at", "updated_at", "closed_at", "url", "html_url", "user",
-    "diff_url", "patch_url",
+fn pr_closed(p: &PullRequest) -> bool {
+    matches!(p.state, Some(StateType::Closed))
+}
+
+fn pr_head(p: &PullRequest) -> Option<&PrBranchInfo> {
+    p.head.as_ref()
+}
+
+fn pr_base(p: &PullRequest) -> Option<&PrBranchInfo> {
+    p.base.as_ref()
+}
+
+/// A branch's name. Gitea's `ref` becomes `refs/pull/N/head` once the head
+/// branch is deleted, while `label` stays the branch name gh reports.
+fn branch_name(b: Option<&PrBranchInfo>) -> serde_json::Value {
+    gh::v(b.and_then(|b| b.label.as_deref().or(b.ref_.as_deref())))
+}
+
+/// gh's `pr list --json` fields that Gitea's pull request data can answer.
+/// Gitea has no GraphQL node IDs, so `id` is the numeric ID.
+const PR_FIELDS: &[Field<PullRequest>] = &[
+    field("additions", |p| gh::v(p.additions)),
+    field("assignees", |p| gh::users(&p.assignees)),
+    field("author", |p| gh::user(p.user.as_ref())),
+    field("baseRefName", |p| branch_name(pr_base(p))),
+    field("baseRefOid", |p| gh::v(pr_base(p).and_then(|b| b.sha.as_deref()))),
+    field("body", |p| gh::v(p.body.as_deref().unwrap_or(""))),
+    field("changedFiles", |p| gh::v(p.changed_files)),
+    field("closed", |p| gh::v(pr_closed(p))),
+    field("closedAt", |p| gh::time(p.closed_at)),
+    field("createdAt", |p| gh::time(p.created_at)),
+    field("deletions", |p| gh::v(p.deletions)),
+    field("headRefName", |p| branch_name(pr_head(p))),
+    field("headRefOid", |p| gh::v(pr_head(p).and_then(|h| h.sha.as_deref()))),
+    field("headRepository", |p| {
+        pr_head(p).and_then(|h| h.repo.as_ref()).map_or(serde_json::Value::Null, |r| {
+            serde_json::json!({"id": r.id, "name": r.name})
+        })
+    }),
+    field("headRepositoryOwner", |p| {
+        gh::user(pr_head(p).and_then(|h| h.repo.as_ref()).and_then(|r| r.owner.as_ref()))
+    }),
+    field("id", |p| gh::v(p.id)),
+    field("isCrossRepository", |p| {
+        gh::v(pr_head(p).and_then(|h| h.repo_id) != pr_base(p).and_then(|b| b.repo_id))
+    }),
+    field("isDraft", |p| gh::v(p.draft.unwrap_or(false))),
+    field("labels", |p| gh::labels(&p.labels)),
+    field("maintainerCanModify", |p| gh::v(p.allow_maintainer_edit.unwrap_or(false))),
+    field("mergeCommit", |p| {
+        p.merge_commit_sha
+            .as_ref()
+            .map_or(serde_json::Value::Null, |oid| serde_json::json!({"oid": oid}))
+    }),
+    field("mergeable", |p| {
+        gh::v(match p.mergeable {
+            Some(true) => "MERGEABLE",
+            Some(false) => "CONFLICTING",
+            None => "UNKNOWN",
+        })
+    }),
+    field("mergedAt", |p| gh::time(p.merged_at)),
+    field("mergedBy", |p| gh::user(p.merged_by.as_ref())),
+    field("milestone", |p| gh::milestone(p.milestone.as_ref())),
+    field("number", |p| gh::v(p.number)),
+    field("reviewRequests", |p| gh::users(&p.requested_reviewers)),
+    field("state", |p| {
+        gh::v(if p.merged.unwrap_or(false) {
+            "MERGED"
+        } else if pr_closed(p) {
+            "CLOSED"
+        } else {
+            "OPEN"
+        })
+    }),
+    field("title", |p| gh::v(&p.title)),
+    field("updatedAt", |p| gh::time(p.updated_at)),
+    field("url", |p| gh::v(&p.html_url)),
 ];
 
 async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(PR_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -261,8 +337,8 @@ async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     })
     .await?;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &prs, &PR_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&prs);
     }
 
     if prs.is_empty() {

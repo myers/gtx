@@ -3,6 +3,7 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
+use crate::json::{Field, field, gh};
 use crate::paginate;
 use crate::repo;
 use gitea_api::types::Release;
@@ -253,13 +254,65 @@ impl ReleaseCommand {
     }
 }
 
-const RELEASE_FIELDS: &[&str] = &[
-    "id", "tag_name", "name", "body", "draft", "prerelease",
-    "created_at", "published_at", "url", "html_url", "tarball_url", "zipball_url",
-    "assets",
+/// A listed release plus whether Gitea considers it the latest.
+struct ListedRelease {
+    rel: Release,
+    latest: bool,
+}
+
+/// gh's `release list --json` fields.
+const LIST_FIELDS: &[Field<ListedRelease>] = &[
+    field("createdAt", |r| gh::time(r.rel.created_at)),
+    field("isDraft", |r| gh::v(r.rel.draft.unwrap_or(false))),
+    field("isImmutable", |_| gh::v(false)),
+    field("isLatest", |r| gh::v(r.latest)),
+    field("isPrerelease", |r| gh::v(r.rel.prerelease.unwrap_or(false))),
+    field("name", |r| gh::v(r.rel.name.as_deref().unwrap_or(""))),
+    field("publishedAt", |r| gh::time(r.rel.published_at)),
+    field("tagName", |r| gh::v(&r.rel.tag_name)),
+];
+
+/// gh's `release view --json` fields. Gitea has no GraphQL node IDs, so
+/// `id` is the numeric ID, same as `databaseId`.
+const VIEW_FIELDS: &[Field<Release>] = &[
+    field("apiUrl", |r| gh::v(&r.url)),
+    field("assets", |r| {
+        serde_json::Value::Array(
+            r.assets
+                .iter()
+                .map(|a| {
+                    serde_json::json!({
+                        "id": a.id,
+                        "name": a.name,
+                        "size": a.size,
+                        "downloadCount": a.download_count,
+                        "createdAt": gh::time(a.created_at),
+                        "url": a.browser_download_url,
+                    })
+                })
+                .collect(),
+        )
+    }),
+    field("author", |r| gh::user(r.author.as_ref())),
+    field("body", |r| gh::v(r.body.as_deref().unwrap_or(""))),
+    field("createdAt", |r| gh::time(r.created_at)),
+    field("databaseId", |r| gh::v(r.id)),
+    field("id", |r| gh::v(r.id)),
+    field("isDraft", |r| gh::v(r.draft.unwrap_or(false))),
+    field("isImmutable", |_| gh::v(false)),
+    field("isPrerelease", |r| gh::v(r.prerelease.unwrap_or(false))),
+    field("name", |r| gh::v(r.name.as_deref().unwrap_or(""))),
+    field("publishedAt", |r| gh::time(r.published_at)),
+    field("tagName", |r| gh::v(&r.tag_name)),
+    field("tarballUrl", |r| gh::v(&r.tarball_url)),
+    field("targetCommitish", |r| gh::v(&r.target_commitish)),
+    field("uploadUrl", |r| gh::v(&r.upload_url)),
+    field("url", |r| gh::v(&r.html_url)),
+    field("zipballUrl", |r| gh::v(&r.zipball_url)),
 ];
 
 async fn list_releases(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(LIST_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -294,8 +347,20 @@ async fn list_releases(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()
         releases.truncate(args.limit.max(0) as usize);
     }
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &releases, RELEASE_FIELDS);
+    if let Some(json) = json {
+        let latest_id = if json.wants("isLatest") {
+            latest_release(&api, owner, repo).await?.and_then(|r| r.id)
+        } else {
+            None
+        };
+        let rows: Vec<ListedRelease> = releases
+            .into_iter()
+            .map(|rel| ListedRelease {
+                latest: rel.id.is_some() && rel.id == latest_id,
+                rel,
+            })
+            .collect();
+        return json.write_list(&rows);
     }
 
     let is_tty = atty_check();
@@ -738,6 +803,7 @@ fn interactive_create_release(args: &CreateArgs, notes: Option<String>) -> Resul
 }
 
 async fn view_release(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
+    let json = args.json.select(VIEW_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -754,8 +820,8 @@ async fn view_release(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()>
         return crate::browse::open_url(url);
     }
 
-    if args.json.is_json() {
-        return crate::json::write_json_one(&args.json, &rel, RELEASE_FIELDS);
+    if let Some(json) = json {
+        return json.write_one(&rel);
     }
 
     if atty_check() {

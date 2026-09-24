@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::ActionWorkflow;
 use crate::issues::atty_check;
 use crate::repo;
 
@@ -70,12 +72,17 @@ impl WorkflowCommand {
     }
 }
 
-const WORKFLOW_FIELDS: &[&str] = &[
-    "id", "name", "path", "state", "html_url", "badge_url",
-    "created_at", "updated_at",
+/// gh's `workflow list --json` fields. Gitea's workflow IDs are file
+/// names, so `id` is a string.
+const WORKFLOW_FIELDS: &[Field<ActionWorkflow>] = &[
+    field("id", |w| gh::v(&w.id)),
+    field("name", |w| gh::v(&w.name)),
+    field("path", |w| gh::v(&w.path)),
+    field("state", |w| gh::v(&w.state)),
 ];
 
 async fn list_workflows(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(WORKFLOW_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -92,8 +99,8 @@ async fn list_workflows(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<(
 
     let workflows = &result.workflows;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, workflows, WORKFLOW_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(workflows);
     }
 
     if workflows.is_empty() {

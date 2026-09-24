@@ -4,6 +4,8 @@ use eyre::Result;
 use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
 use crate::repo;
+use crate::json::{Field, field, gh};
+use gitea_api::types::ActionWorkflowRun;
 
 fn is_terminal_status(status: &str) -> bool {
     matches!(
@@ -275,10 +277,32 @@ impl RunCommand {
     }
 }
 
-const RUN_FIELDS: &[&str] = &[
-    "id", "display_title", "status", "conclusion", "event", "head_branch",
-    "head_sha", "path", "html_url", "started_at", "completed_at", "created_at",
-    "updated_at",
+/// The workflow file name of a run (its `path` is `<file>@<ref>`).
+fn run_workflow_name(run: &ActionWorkflowRun) -> Option<&str> {
+    let file = run.path.as_deref()?.split('@').next()?;
+    Some(file.rsplit('/').next().unwrap_or(file))
+}
+
+/// gh's `run list --json` fields. Gitea's run API has no creation time or
+/// numeric workflow ID: `createdAt` is when the run started, `updatedAt`
+/// when it completed (or started), and `name`/`workflowName` are the
+/// workflow's file name.
+const RUN_FIELDS: &[Field<ActionWorkflowRun>] = &[
+    field("attempt", |r| gh::v(r.run_attempt)),
+    field("conclusion", |r| gh::v(r.conclusion.as_deref().unwrap_or(""))),
+    field("createdAt", |r| gh::time(r.started_at)),
+    field("databaseId", |r| gh::v(r.id)),
+    field("displayTitle", |r| gh::v(&r.display_title)),
+    field("event", |r| gh::v(&r.event)),
+    field("headBranch", |r| gh::v(&r.head_branch)),
+    field("headSha", |r| gh::v(&r.head_sha)),
+    field("name", |r| gh::v(run_workflow_name(r))),
+    field("number", |r| gh::v(r.run_number)),
+    field("startedAt", |r| gh::time(r.started_at)),
+    field("status", |r| gh::v(&r.status)),
+    field("updatedAt", |r| gh::time(r.completed_at.or(r.started_at))),
+    field("url", |r| gh::v(&r.html_url)),
+    field("workflowName", |r| gh::v(run_workflow_name(r))),
 ];
 
 /// Workflow runs carry `path` = `<workflow file>@<ref>`. Match a `--workflow`
@@ -345,6 +369,7 @@ async fn fetch_runs(
 }
 
 async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(RUN_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -359,8 +384,8 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     )
     .await?;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &runs, RUN_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&runs);
     }
 
     if runs.is_empty() {

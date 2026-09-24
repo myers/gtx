@@ -26,11 +26,12 @@ fn run_list_passes_filters_to_server() {
         .gtx()
         .args([
             "run", "list", "-R", "o/r", "--commit", sha, "--branch", "main", "--status",
-            "completed", "--event", "push", "--user", "alice", "--limit", "5", "--json", "id",
+            "completed", "--event", "push", "--user", "alice", "--limit", "5", "--json",
+            "databaseId",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"id\": 7"));
+        .stdout(predicate::str::contains("\"databaseId\": 7"));
 
     let seen = server.seen();
     assert_eq!(seen.len(), 1, "{seen:?}");
@@ -61,12 +62,44 @@ fn run_list_workflow_filters_client_side() {
     server
         .gtx()
         .args([
-            "run", "list", "-R", "o/r", "--workflow", ".forgejo/workflows/ci.yml", "--json", "id",
-            "--jq", ".[].id",
+            "run", "list", "-R", "o/r", "--workflow", ".forgejo/workflows/ci.yml", "--json",
+            "databaseId", "--jq", ".[].databaseId",
         ])
         .assert()
         .success()
         .stdout("1\n3\n");
+}
+
+/// `run list --json` takes gh's field names.
+#[test]
+fn run_list_json_uses_gh_field_names() {
+    let server = FakeGitea::start(|_| runs_json(&[(7, "abc", ".gitea/workflows/ci.yml@refs/heads/main")]));
+    let out = server
+        .gtx()
+        .args([
+            "run", "list", "-R", "o/r", "--json",
+            "databaseId,headSha,status,conclusion,displayTitle,workflowName",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([{
+            "databaseId": 7, "headSha": "abc", "status": "completed",
+            "conclusion": "success", "displayTitle": "t", "workflowName": "ci.yml",
+        }])
+    );
+
+    server
+        .gtx()
+        .args(["run", "list", "-R", "o/r", "--json", "head_sha"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown JSON field: \"head_sha\""));
 }
 
 #[test]

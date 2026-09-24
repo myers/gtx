@@ -2,17 +2,16 @@ use clap::Args;
 use eyre::Result;
 use serde::Serialize;
 
-/// Shared `--json` and `--jq` flags for list commands.
+/// Shared `--json` and `--jq` flags.
 #[derive(Args, Clone, Default, Debug)]
 pub struct JsonArgs {
-    /// Output JSON with specified fields (comma-separated).
-    /// With no fields, dumps the full object.
-    /// Use `--json help` to list available fields.
-    #[arg(long, value_delimiter = ',', num_args = 0..)]
+    /// Output JSON with the specified fields (comma-separated); with no
+    /// fields, list the available ones
+    #[arg(long, value_name = "FIELDS", value_delimiter = ',', num_args = 0..)]
     pub json: Option<Vec<String>>,
 
-    /// Filter JSON output with a jq expression (requires --json)
-    #[arg(long = "jq", value_name = "EXPR", requires = "json")]
+    /// Filter JSON output using a jq expression (requires --json)
+    #[arg(short = 'q', long = "jq", value_name = "EXPR", requires = "json")]
     pub jq_expr: Option<String>,
 }
 
@@ -20,6 +19,133 @@ impl JsonArgs {
     /// Returns true if JSON output was requested.
     pub fn is_json(&self) -> bool {
         self.json.is_some()
+    }
+
+    /// Check the requested `--json` fields against `fields`, the way gh does:
+    /// bare `--json` lists the available fields and an unknown field is an
+    /// error, both before anything is fetched. `Ok(None)` means no JSON was
+    /// asked for.
+    pub fn select<'f, T>(&self, fields: &'f [Field<T>]) -> Result<Option<Selection<'f, T>>> {
+        let Some(requested) = &self.json else {
+            return Ok(None);
+        };
+        let mut names: Vec<&str> = fields.iter().map(|f| f.name).collect();
+        names.sort_unstable();
+        let list = names.iter().map(|n| format!("  {n}")).collect::<Vec<_>>().join("\n");
+        if requested.is_empty() {
+            eyre::bail!("Specify one or more comma-separated fields for `--json`:\n{list}");
+        }
+        let mut chosen = Vec::new();
+        for name in requested {
+            let Some(field) = fields.iter().find(|f| f.name == name) else {
+                eyre::bail!("Unknown JSON field: {name:?}\nAvailable fields:\n{list}");
+            };
+            chosen.push(field);
+        }
+        Ok(Some(Selection {
+            fields: chosen,
+            jq: self.jq_expr.clone(),
+        }))
+    }
+}
+
+/// One gh-named `--json` field and how to compute it from a `T` (usually a
+/// Gitea API type, or a wrapper carrying extra context such as "is latest").
+pub struct Field<T> {
+    pub name: &'static str,
+    pub get: fn(&T) -> serde_json::Value,
+}
+
+/// Shorthand for building a [`Field`] table.
+pub const fn field<T>(name: &'static str, get: fn(&T) -> serde_json::Value) -> Field<T> {
+    Field { name, get }
+}
+
+/// The fields a user picked with `--json`, from [`JsonArgs::select`].
+pub struct Selection<'f, T> {
+    fields: Vec<&'f Field<T>>,
+    jq: Option<String>,
+}
+
+impl<T> Selection<'_, T> {
+    /// Whether `name` was requested, to skip fetching data nobody asked for.
+    pub fn wants(&self, name: &str) -> bool {
+        self.fields.iter().any(|f| f.name == name)
+    }
+
+    fn object(&self, item: &T) -> serde_json::Value {
+        serde_json::Value::Object(
+            self.fields
+                .iter()
+                .map(|f| (f.name.to_string(), (f.get)(item)))
+                .collect(),
+        )
+    }
+
+    /// Print `items` as a JSON array of the selected fields (or run `--jq`).
+    pub fn write_list(&self, items: &[T]) -> Result<()> {
+        let v = serde_json::Value::Array(items.iter().map(|i| self.object(i)).collect());
+        self.write(&v)
+    }
+
+    /// Print one object of the selected fields (or run `--jq`).
+    pub fn write_one(&self, item: &T) -> Result<()> {
+        self.write(&self.object(item))
+    }
+
+    fn write(&self, value: &serde_json::Value) -> Result<()> {
+        match &self.jq {
+            Some(expr) => print_jq(value, expr),
+            None => {
+                println!("{}", serde_json::to_string_pretty(value)?);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Value helpers for [`Field`] getters: gh's shapes for common Gitea data.
+pub mod gh {
+    use gitea_api::types::{Label, Milestone, User};
+    use serde_json::{Value, json};
+
+    /// `Option<T>` (or anything serializable) as JSON, `null` when absent.
+    pub fn v<T: serde::Serialize>(x: T) -> Value {
+        serde_json::to_value(x).unwrap_or(Value::Null)
+    }
+
+    /// A timestamp the way gh prints one: RFC 3339, whole seconds, `Z`.
+    pub fn time(t: Option<chrono::DateTime<chrono::Utc>>) -> Value {
+        t.map_or(Value::Null, |t| {
+            Value::String(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        })
+    }
+
+    /// gh's user object: `{id, login, name}`.
+    pub fn user(u: Option<&User>) -> Value {
+        u.map_or(Value::Null, |u| {
+            json!({"id": u.id, "login": u.login, "name": u.full_name.as_deref().unwrap_or("")})
+        })
+    }
+
+    pub fn users(us: &[User]) -> Value {
+        Value::Array(us.iter().map(|u| user(Some(u))).collect())
+    }
+
+    /// gh's label object: `{id, name, description, color}`.
+    pub fn labels(ls: &[Label]) -> Value {
+        Value::Array(
+            ls.iter()
+                .map(|l| json!({"id": l.id, "name": l.name, "description": l.description.as_deref().unwrap_or(""), "color": l.color}))
+                .collect(),
+        )
+    }
+
+    /// gh's milestone object: `{number, title, description, dueOn}`.
+    pub fn milestone(m: Option<&Milestone>) -> Value {
+        m.map_or(Value::Null, |m| {
+            json!({"number": m.id, "title": m.title, "description": m.description.as_deref().unwrap_or(""), "dueOn": time(m.due_on)})
+        })
     }
 }
 
@@ -34,15 +160,6 @@ pub fn write_json<T: Serialize>(
     available_fields: &[&str],
 ) -> Result<()> {
     write_json_value(args, serde_json::to_value(items)?, available_fields)
-}
-
-/// Like [`write_json`], for a single object (e.g. a `view` command).
-pub fn write_json_one<T: Serialize>(
-    args: &JsonArgs,
-    item: &T,
-    available_fields: &[&str],
-) -> Result<()> {
-    write_json_value(args, serde_json::to_value(item)?, available_fields)
 }
 
 fn write_json_value(

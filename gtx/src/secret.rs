@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::Secret;
 use crate::issues::atty_check;
 use crate::repo;
 
@@ -56,9 +58,15 @@ impl SecretCommand {
     }
 }
 
-const SECRET_FIELDS: &[&str] = &["name", "created_at"];
+/// gh's `secret list --json` fields for repository secrets. Gitea only
+/// records when a secret was created, which is also when it last changed.
+const SECRET_FIELDS: &[Field<Secret>] = &[
+    field("name", |s| gh::v(&s.name)),
+    field("updatedAt", |s| gh::time(s.created_at)),
+];
 
 async fn list_secrets(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(SECRET_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -73,8 +81,8 @@ async fn list_secrets(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()>
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &secrets, SECRET_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&secrets);
     }
 
     if secrets.is_empty() {

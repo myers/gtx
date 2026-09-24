@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::Label;
 use crate::issues::atty_check;
 use crate::paginate;
 use crate::repo;
@@ -92,9 +94,18 @@ impl LabelCommand {
     }
 }
 
-const LABEL_FIELDS: &[&str] = &["id", "name", "color", "description", "url"];
+/// gh's `label list --json` fields that Gitea has (no timestamps or
+/// "default" flag). Gitea has no GraphQL node IDs, so `id` is numeric.
+const LABEL_FIELDS: &[Field<Label>] = &[
+    field("color", |l| gh::v(&l.color)),
+    field("description", |l| gh::v(l.description.as_deref().unwrap_or(""))),
+    field("id", |l| gh::v(l.id)),
+    field("name", |l| gh::v(&l.name)),
+    field("url", |l| gh::v(&l.url)),
+];
 
 async fn list_labels(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(LABEL_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -118,8 +129,8 @@ async fn list_labels(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
     })
     .await?;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &labels, &LABEL_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&labels);
     }
 
     if labels.is_empty() {

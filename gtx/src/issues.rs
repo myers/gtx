@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::{Issue, StateType};
 use crate::paginate;
 use crate::repo;
 
@@ -188,13 +190,32 @@ impl IssueCommand {
     }
 }
 
-const ISSUE_FIELDS: &[&str] = &[
-    "number", "title", "state", "body", "labels", "assignees", "milestone",
-    "comments", "created_at", "updated_at", "closed_at", "due_date", "url",
-    "html_url", "user", "repository",
+fn issue_closed(i: &Issue) -> bool {
+    matches!(i.state, Some(StateType::Closed))
+}
+
+/// gh's `issue list --json` fields that Gitea's issue data can answer.
+/// Gitea has no GraphQL node IDs, so `id` is the numeric ID.
+const ISSUE_FIELDS: &[Field<Issue>] = &[
+    field("assignees", |i| gh::users(&i.assignees)),
+    field("author", |i| gh::user(i.user.as_ref())),
+    field("body", |i| gh::v(i.body.as_deref().unwrap_or(""))),
+    field("closed", |i| gh::v(issue_closed(i))),
+    field("closedAt", |i| gh::time(i.closed_at)),
+    field("createdAt", |i| gh::time(i.created_at)),
+    field("id", |i| gh::v(i.id)),
+    field("isPinned", |i| gh::v(i.pin_order.unwrap_or(0) > 0)),
+    field("labels", |i| gh::labels(&i.labels)),
+    field("milestone", |i| gh::milestone(i.milestone.as_ref())),
+    field("number", |i| gh::v(i.number)),
+    field("state", |i| gh::v(if issue_closed(i) { "CLOSED" } else { "OPEN" })),
+    field("title", |i| gh::v(&i.title)),
+    field("updatedAt", |i| gh::time(i.updated_at)),
+    field("url", |i| gh::v(&i.html_url)),
 ];
 
 async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(ISSUE_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
 
@@ -228,8 +249,8 @@ async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
     })
     .await?;
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &issues, &ISSUE_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&issues);
     }
 
     if issues.is_empty() {

@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::DeployKey;
 use crate::issues::{atty_check, relative_time};
 use crate::paginate;
 use crate::repo;
@@ -496,8 +498,13 @@ async fn rename_repo(repo_args: &repo::RepoArgs, args: &RenameArgs) -> Result<()
     Ok(())
 }
 
-const DEPLOY_KEY_FIELDS: &[&str] = &[
-    "id", "title", "key", "url", "read_only", "created_at",
+/// gh's `repo deploy-key list --json` fields.
+const DEPLOY_KEY_FIELDS: &[Field<DeployKey>] = &[
+    field("createdAt", |k| gh::time(k.created_at)),
+    field("id", |k| gh::v(k.id)),
+    field("key", |k| gh::v(&k.key)),
+    field("readOnly", |k| gh::v(k.read_only.unwrap_or(false))),
+    field("title", |k| gh::v(&k.title)),
 ];
 
 async fn deploy_key(repo_args: &repo::RepoArgs, cmd: &DeployKeyCommand) -> Result<()> {
@@ -509,6 +516,7 @@ async fn deploy_key(repo_args: &repo::RepoArgs, cmd: &DeployKeyCommand) -> Resul
 }
 
 async fn deploy_key_list(repo_args: &repo::RepoArgs, args: &DeployKeyListArgs) -> Result<()> {
+    let json = args.json.select(DEPLOY_KEY_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -523,8 +531,8 @@ async fn deploy_key_list(repo_args: &repo::RepoArgs, args: &DeployKeyListArgs) -
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &keys, DEPLOY_KEY_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&keys);
     }
 
     if keys.is_empty() {

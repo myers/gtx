@@ -2,6 +2,8 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::json::{Field, field, gh};
+use gitea_api::types::ActionVariable;
 use crate::issues::atty_check;
 use crate::repo;
 
@@ -64,9 +66,14 @@ impl VariableCommand {
     }
 }
 
-const VARIABLE_FIELDS: &[&str] = &["name", "data", "owner_id"];
+/// gh's `variable list --json` fields that Gitea has (no timestamps).
+const VARIABLE_FIELDS: &[Field<ActionVariable>] = &[
+    field("name", |v| gh::v(&v.name)),
+    field("value", |v| gh::v(&v.data)),
+];
 
 async fn list_variables(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
+    let json = args.json.select(VARIABLE_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
@@ -81,8 +88,8 @@ async fn list_variables(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<(
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    if args.json.is_json() {
-        return crate::json::write_json(&args.json, &vars, VARIABLE_FIELDS);
+    if let Some(json) = json {
+        return json.write_list(&vars);
     }
 
     if vars.is_empty() {

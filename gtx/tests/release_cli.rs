@@ -423,8 +423,9 @@ fn release_view_without_tag_shows_latest() {
     assert_eq!(server.seen(), ["GET /api/v1/repos/o/r/releases/latest"]);
 }
 
+/// `release view --json` takes gh's field names and shapes.
 #[test]
-fn release_view_json_selects_fields_of_one_object() {
+fn release_view_json_uses_gh_field_names() {
     let server = tag_server();
     let out = server
         .gtx()
@@ -435,7 +436,7 @@ fn release_view_json_selects_fields_of_one_object() {
             "o/r",
             "v1",
             "--json",
-            "id,tag_name",
+            "databaseId,tagName,name,url,isDraft,isPrerelease,tarballUrl,assets",
         ])
         .assert()
         .success()
@@ -443,24 +444,57 @@ fn release_view_json_selects_fields_of_one_object() {
         .stdout
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(v, serde_json::json!({"id": 4, "tag_name": "v1"}));
+    let base = &server.url;
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "databaseId": 4,
+            "tagName": "v1",
+            "name": "Title v1",
+            "url": format!("{base}/o/r/releases/tag/v1"),
+            "isDraft": false,
+            "isPrerelease": false,
+            "tarballUrl": format!("{base}/o/r/archive/v1.tar.gz"),
+            "assets": [{
+                "id": 0,
+                "name": "a.txt",
+                "size": null,
+                "downloadCount": null,
+                "createdAt": null,
+                "url": format!("{base}/attachments/a.txt"),
+            }],
+        })
+    );
 
     server
         .gtx()
-        .args([
-            "release",
-            "view",
-            "-R",
-            "o/r",
-            "v1",
-            "--json",
-            "tag_name",
-            "--jq",
-            ".tag_name",
-        ])
+        .args(["release", "view", "-R", "o/r", "v1", "--json", "tagName", "-q", ".tagName"])
         .assert()
         .success()
         .stdout("v1\n");
+}
+
+/// Like gh: Gitea's own field names are unknown, and bare `--json` lists
+/// gh's names; neither touches the server.
+#[test]
+fn release_json_rejects_gitea_field_names() {
+    let server = tag_server();
+    server
+        .gtx()
+        .args(["release", "view", "-R", "o/r", "v1", "--json", "tag_name"])
+        .assert()
+        .failure()
+        .stderr(contains("Unknown JSON field: \"tag_name\"").and(contains("  tagName\n")));
+    server
+        .gtx()
+        .args(["release", "list", "-R", "o/r", "--json"])
+        .assert()
+        .failure()
+        .stderr(
+            contains("Specify one or more comma-separated fields for `--json`:")
+                .and(contains("  isLatest\n")),
+        );
+    assert!(server.seen().is_empty(), "{:?}", server.seen());
 }
 
 /// Like gh, a draft the by-tag lookup can't see is found among the drafts.
@@ -1044,4 +1078,55 @@ fn release_create_latest() {
             assert!(server.seen().is_empty(), "{args:?}: {:?}", server.seen());
         }
     }
+}
+
+/// `release list --json` has gh's list fields, `isLatest` from Gitea's
+/// latest release.
+#[test]
+fn release_list_json_uses_gh_field_names() {
+    let server = list_server(true);
+    let out = server
+        .gtx()
+        .args([
+            "release",
+            "list",
+            "-R",
+            "o/r",
+            "-L",
+            "3",
+            "--json",
+            "tagName,name,isLatest,isDraft,isPrerelease,isImmutable,createdAt,publishedAt",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let row = |tag: &str, name: &str, latest: bool, draft: bool, pre: bool, day: u32| {
+        serde_json::json!({
+            "tagName": tag, "name": name, "isLatest": latest, "isDraft": draft,
+            "isPrerelease": pre, "isImmutable": false,
+            "createdAt": format!("2026-01-0{day}T00:00:00Z"),
+            "publishedAt": format!("2026-01-0{day}T12:00:00Z"),
+        })
+    };
+    assert_eq!(
+        v,
+        serde_json::json!([
+            row("v4", "", false, true, false, 4),
+            row("v3", "Pre 3", false, false, true, 3),
+            row("v2", "  Two   words ", true, false, false, 2),
+        ])
+    );
+
+    // Without isLatest, the latest release isn't fetched.
+    let server = list_server(true);
+    server
+        .gtx()
+        .args(["release", "list", "-R", "o/r", "--json", "tagName", "--jq", ".[].tagName"])
+        .assert()
+        .success()
+        .stdout("v4\nv3\nv2\nv1\n");
+    assert_eq!(server.seen().len(), 1, "{:?}", server.seen());
 }
