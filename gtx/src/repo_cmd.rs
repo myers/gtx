@@ -55,7 +55,7 @@ struct ListArgs {
     owner: Option<String>,
 
     /// Maximum number of repos to show
-    #[arg(short, long, default_value = "30")]
+    #[arg(short = 'L', long, default_value = "30")]
     limit: i64,
 
     #[command(flatten)]

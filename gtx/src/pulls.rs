@@ -54,7 +54,7 @@ struct ListArgs {
     state: String,
 
     /// Maximum number of PRs to show
-    #[arg(short, long, default_value = "30")]
+    #[arg(short = 'L', long, default_value = "30")]
     limit: i64,
 
     #[command(flatten)]

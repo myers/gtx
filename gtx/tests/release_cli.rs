@@ -1130,3 +1130,206 @@ fn release_list_json_uses_gh_field_names() {
         .stdout("v4\nv3\nv2\nv1\n");
     assert_eq!(server.seen().len(), 1, "{:?}", server.seen());
 }
+
+/// A fake Gitea for `release edit --latest`: release `v1` (id 4), with
+/// `latest_id` the release Gitea reports as latest (`None`: no latest).
+fn edit_latest_server(latest_id: Option<u32>) -> FakeGitea {
+    FakeGitea::start_with(move |method, target| {
+        let rel = |id: u32, tag: &str| format!(r#"{{"id":{id},"tag_name":"{tag}","html_url":"u"}}"#);
+        match (method, target) {
+            ("GET", "/api/v1/repos/o/r/releases/tags/v1") | ("PATCH", "/api/v1/repos/o/r/releases/4") => {
+                (200, rel(4, "v1"))
+            }
+            ("GET", "/api/v1/repos/o/r/releases/latest") => match latest_id {
+                Some(4) => (200, rel(4, "v1")),
+                Some(id) => (200, rel(id, "v9")),
+                None => (404, r#"{"message":"not found"}"#.into()),
+            },
+            _ => (404, r#"{"message":"not found"}"#.into()),
+        }
+    })
+}
+
+/// Like `create --latest`: Gitea can't mark a release latest, so `edit
+/// --latest[=false]` checks the result and rejects what it can't honor.
+#[test]
+fn release_edit_latest() {
+    let server = edit_latest_server(Some(4));
+    server
+        .gtx()
+        .args(["release", "edit", "-R", "o/r", "v1", "--latest"])
+        .assert()
+        .success()
+        .stdout("u\n");
+    assert_eq!(
+        server.seen(),
+        [
+            "GET /api/v1/repos/o/r/releases/tags/v1",
+            "PATCH /api/v1/repos/o/r/releases/4",
+            "GET /api/v1/repos/o/r/releases/latest"
+        ]
+    );
+
+    let server = edit_latest_server(Some(8));
+    server
+        .gtx()
+        .args(["release", "edit", "-R", "o/r", "v1", "--latest"])
+        .assert()
+        .failure()
+        .stderr(contains("Gitea's latest release is v9, not v1"));
+
+    // --latest=false holds for a release that isn't latest...
+    let server = edit_latest_server(Some(8));
+    server
+        .gtx()
+        .args(["release", "edit", "-R", "o/r", "v1", "--latest=false"])
+        .assert()
+        .success();
+    // ...but can't unmark the latest one.
+    let server = edit_latest_server(Some(4));
+    server
+        .gtx()
+        .args(["release", "edit", "-R", "o/r", "v1", "--latest=false"])
+        .assert()
+        .failure()
+        .stderr(contains("v1 is still Gitea's latest release"));
+
+    // Drafts and prereleases can't be latest: rejected before editing.
+    for args in [&["--latest", "--draft"][..], &["--latest", "--prerelease"][..]] {
+        let server = edit_latest_server(Some(4));
+        server
+            .gtx()
+            .args(["release", "edit", "-R", "o/r", "v1"])
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(contains("--latest can't be used with a draft or prerelease"));
+        assert!(
+            !server.seen().iter().any(|s| s.starts_with("PATCH")),
+            "{:?}",
+            server.seen()
+        );
+    }
+}
+
+/// Gitea has no discussions.
+#[test]
+fn release_discussion_category_is_rejected() {
+    for cmd in ["create", "edit"] {
+        let server = tag_server();
+        server
+            .gtx()
+            .args(["release", cmd, "-R", "o/r", "v1", "--discussion-category", "General"])
+            .assert()
+            .failure()
+            .stderr(contains("Gitea has no discussions"));
+        assert!(server.seen().is_empty(), "{cmd}: {:?}", server.seen());
+    }
+}
+
+/// A fake Gitea for `--fail-on-no-commits`: latest release `v1` (unless
+/// `latest` is false), default branch `trunk`, and `ahead` commits on any
+/// compare.
+fn compare_server(latest: bool, ahead: u32) -> FakeGitea {
+    FakeGitea::start_with(move |method, target| match (method, target) {
+        ("GET", "/api/v1/repos/o/r/releases/latest") if latest => {
+            (200, r#"{"id":4,"tag_name":"v1"}"#.into())
+        }
+        ("GET", "/api/v1/repos/o/r") => (200, r#"{"name":"r","default_branch":"trunk"}"#.into()),
+        ("GET", t) if t.starts_with("/api/v1/repos/o/r/compare/") => {
+            let commits: Vec<String> = (0..ahead).map(|i| format!(r#"{{"sha":"{i}"}}"#)).collect();
+            (
+                200,
+                format!(r#"{{"total_commits":{ahead},"commits":[{}]}}"#, commits.join(",")),
+            )
+        }
+        ("POST", "/api/v1/repos/o/r/releases") => {
+            (201, r#"{"id":5,"tag_name":"v2","html_url":"u"}"#.into())
+        }
+        _ => (404, r#"{"message":"not found"}"#.into()),
+    })
+}
+
+#[test]
+fn release_create_fail_on_no_commits() {
+    // No commits since v1 on the default branch: fail before creating.
+    let server = compare_server(true, 0);
+    server
+        .gtx()
+        .args(["release", "create", "-R", "o/r", "v2", "--fail-on-no-commits"])
+        .assert()
+        .failure()
+        .stderr(contains("no new commits since the last release: v1"));
+    let seen = server.seen();
+    assert!(
+        seen.contains(&"GET /api/v1/repos/o/r/compare/v1...trunk".to_string()),
+        "{seen:?}"
+    );
+    assert!(!seen.iter().any(|s| s.starts_with("POST")), "{seen:?}");
+
+    // Commits since v1 on --target: create.
+    let server = compare_server(true, 2);
+    server
+        .gtx()
+        .args([
+            "release", "create", "-R", "o/r", "v2", "--fail-on-no-commits", "--target", "dev",
+        ])
+        .assert()
+        .success();
+    let seen = server.seen();
+    assert!(
+        seen.contains(&"GET /api/v1/repos/o/r/compare/v1...dev".to_string()),
+        "{seen:?}"
+    );
+    assert!(seen.contains(&"POST /api/v1/repos/o/r/releases".to_string()));
+
+    // First release: no effect.
+    let server = compare_server(false, 0);
+    server
+        .gtx()
+        .args(["release", "create", "-R", "o/r", "v2", "--fail-on-no-commits"])
+        .assert()
+        .success();
+    assert!(!server.seen().iter().any(|s| s.contains("/compare/")));
+}
+
+/// gh's `file#Display label`: Gitea assets have no label, so the label is
+/// dropped with a warning and the file uploads under its own name.
+#[test]
+fn release_asset_display_label_is_dropped_with_warning() {
+    let dir = scratch("label");
+    std::fs::write(dir.join("a.zip"), "zip").unwrap();
+
+    let server = tag_server();
+    server
+        .gtx()
+        .current_dir(&dir)
+        .args(["release", "upload", "-R", "o/r", "v1", "a.zip#My label"])
+        .assert()
+        .success()
+        .stderr(contains("Gitea release assets have no display label; ignoring \"My label\""));
+    assert!(
+        server
+            .seen()
+            .contains(&"POST /api/v1/repos/o/r/releases/4/assets?name=a.zip".to_string()),
+        "{:?}",
+        server.seen()
+    );
+
+    let server = tag_server();
+    server
+        .gtx()
+        .current_dir(&dir)
+        .args(["release", "create", "-R", "o/r", "v1", "a.zip#My label"])
+        .assert()
+        .success()
+        .stderr(contains("ignoring \"My label\""));
+    assert!(
+        server
+            .seen()
+            .contains(&"POST /api/v1/repos/o/r/releases/4/assets?name=a.zip".to_string()),
+        "{:?}",
+        server.seen()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

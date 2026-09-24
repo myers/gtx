@@ -64,7 +64,8 @@ struct CreateArgs {
     /// Tag name (prompted for when omitted and running interactively)
     tag: Option<String>,
 
-    /// Files to upload as release assets
+    /// Files to upload as release assets. gh's `file#label` display labels
+    /// are dropped with a warning: Gitea assets have no label
     files: Vec<String>,
 
     /// Release title (defaults to the tag name)
@@ -113,6 +114,14 @@ struct CreateArgs {
     /// Not supported: Gitea has no API for generating release notes
     #[arg(long, value_name = "STRING")]
     notes_start_tag: Option<String>,
+
+    /// Fail if there are no commits since the last release (no impact on the first release)
+    #[arg(long)]
+    fail_on_no_commits: bool,
+
+    /// Not supported: Gitea has no discussions
+    #[arg(long, value_name = "STRING")]
+    discussion_category: Option<String>,
 }
 
 #[derive(Args)]
@@ -210,6 +219,17 @@ struct EditReleaseArgs {
     /// Abort in case the git tag doesn't already exist in the remote repository
     #[arg(long)]
     verify_tag: bool,
+
+    /// Explicitly mark the release as "Latest" (`--latest=false` to require it isn't).
+    /// Gitea can't mark releases: its latest is always the most recently created
+    /// published non-prerelease, so this only checks that the edited release is
+    /// (or isn't) latest
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    latest: Option<bool>,
+
+    /// Not supported: Gitea has no discussions
+    #[arg(long, value_name = "STRING")]
+    discussion_category: Option<String>,
 }
 
 #[derive(Args)]
@@ -217,7 +237,8 @@ struct UploadArgs {
     /// Release tag
     tag: String,
 
-    /// File(s) to upload
+    /// File(s) to upload. gh's `file#label` display labels are dropped with a
+    /// warning: Gitea assets have no label
     #[arg(required = true)]
     files: Vec<String>,
 
@@ -553,13 +574,32 @@ async fn verify_tag(api: &gitea_api::Gitea, owner: &str, repo: &str, tag: &str) 
     }
 }
 
-/// Fail on the first of `files` that isn't a readable regular file.
-fn check_files(files: &[String]) -> Result<()> {
-    match files.iter().find(|f| !std::path::Path::new(f).is_file()) {
-        Some(f) => eyre::bail!("File not found: {f}"),
-        None => Ok(()),
+/// The paths of asset arguments, with gh's `file#Display label` labels
+/// dropped (with a warning: Gitea attachments have no label). Fails on the
+/// first that isn't a readable regular file.
+fn asset_paths(files: &[String]) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for arg in files {
+        let path = match arg.find('#') {
+            Some(i) if i > 0 => {
+                let label = &arg[i + 1..];
+                eprintln!(
+                    "warning: Gitea release assets have no display label; ignoring {label:?} for {}",
+                    &arg[..i]
+                );
+                &arg[..i]
+            }
+            _ => arg.as_str(),
+        };
+        if !std::path::Path::new(path).is_file() {
+            eyre::bail!("File not found: {path}");
+        }
+        paths.push(path.to_string());
     }
+    Ok(paths)
 }
+
+const NO_DISCUSSIONS: &str = "--discussion-category is not supported: Gitea has no discussions";
 
 fn file_name(path: &str) -> Result<String> {
     Ok(std::path::Path::new(path)
@@ -620,7 +660,10 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
             "--generate-notes and --notes-start-tag are not supported: Gitea has no API for generating release notes"
         );
     }
-    check_files(&args.files)?;
+    if args.discussion_category.is_some() {
+        eyre::bail!(NO_DISCUSSIONS);
+    }
+    let files = asset_paths(&args.files)?;
     let notes = read_notes(&args.notes, &args.notes_file)?;
     let mut new = match &args.tag {
         Some(tag) => NewRelease {
@@ -655,6 +698,10 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
         verify_tag(&api, owner, repo, &new.tag).await?;
     }
 
+    if args.fail_on_no_commits {
+        fail_on_no_commits(&api, owner, repo, args.target.as_deref()).await?;
+    }
+
     if args.notes_from_tag {
         let message = tag_message(&api, owner, repo, &new.tag).await?;
         new.notes = Some(match new.notes.take().filter(|n| !n.is_empty()) {
@@ -664,7 +711,7 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
     }
 
     // Like gh: attach the files to a draft, then publish it once they're all there.
-    let publish_after_upload = !args.files.is_empty() && !new.draft;
+    let publish_after_upload = !files.is_empty() && !new.draft;
     let rel = api
         .repo_create_release()
         .owner(owner)
@@ -691,7 +738,7 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
         .id
         .ok_or_else(|| eyre::eyre!("server returned a release without an id"))?;
 
-    for file in &args.files {
+    for file in &files {
         upload_asset(&api, &config, owner, repo, id, file).await?;
     }
 
@@ -712,17 +759,78 @@ async fn create_release(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
     println!("{}", rel.html_url.as_deref().unwrap_or(""));
 
     if args.latest == Some(true) {
-        let latest = latest_release(&api, owner, repo).await?;
-        if latest.as_ref().and_then(|r| r.id) != rel.id {
-            let latest_tag = latest
-                .as_ref()
-                .and_then(|r| r.tag_name.as_deref())
-                .unwrap_or("none");
-            eyre::bail!(
-                "Gitea's latest release is {latest_tag}, not {}: Gitea can't mark a release latest; it picks the published non-prerelease created most recently (a release of an existing tag counts as created at the tag's commit)",
-                new.tag
-            );
-        }
+        check_latest(&api, owner, repo, &rel, true).await?;
+    }
+    Ok(())
+}
+
+/// `--latest[=false]`: fail unless `rel` is (or, for `want = false`, isn't)
+/// Gitea's latest release, which Gitea picks by itself.
+async fn check_latest(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    rel: &Release,
+    want: bool,
+) -> Result<()> {
+    const WHY: &str = "Gitea can't mark a release latest; it picks the published non-prerelease created most recently (a release of an existing tag counts as created at the tag's commit)";
+    let latest = latest_release(api, owner, repo).await?;
+    let is_latest = latest.as_ref().and_then(|r| r.id) == rel.id;
+    let tag = rel.tag_name.as_deref().unwrap_or("");
+    if want && !is_latest {
+        let latest_tag = latest
+            .as_ref()
+            .and_then(|r| r.tag_name.as_deref())
+            .unwrap_or("none");
+        eyre::bail!("Gitea's latest release is {latest_tag}, not {tag}: {WHY}");
+    }
+    if !want && is_latest {
+        eyre::bail!("{tag} is still Gitea's latest release: {WHY}");
+    }
+    Ok(())
+}
+
+/// `--fail-on-no-commits`: fail if `target` (default: the default branch)
+/// has no commits since the latest release's tag. No latest release, no check.
+async fn fail_on_no_commits(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    target: Option<&str>,
+) -> Result<()> {
+    let Some(latest) = latest_release(api, owner, repo).await? else {
+        return Ok(());
+    };
+    let Some(latest_tag) = latest.tag_name.filter(|t| !t.is_empty()) else {
+        return Ok(());
+    };
+    let target = match target {
+        Some(target) => target.to_string(),
+        None => api
+            .repo_get()
+            .owner(owner)
+            .repo(repo)
+            .send()
+            .await
+            .map_err(api_error)?
+            .into_inner()
+            .default_branch
+            .ok_or_else(|| eyre::eyre!("repository {owner}/{repo} has no default branch"))?,
+    };
+    let compare = api
+        .repo_compare_diff()
+        .owner(owner)
+        .repo(repo)
+        .basehead(format!("{latest_tag}...{target}"))
+        .send()
+        .await
+        .map_err(api_error)?
+        .into_inner();
+    let ahead = compare
+        .total_commits
+        .unwrap_or(compare.commits.len() as i64);
+    if ahead < 1 {
+        eyre::bail!("no new commits since the last release: {latest_tag}");
     }
     Ok(())
 }
@@ -1127,11 +1235,22 @@ async fn edit_release(repo_args: &repo::RepoArgs, args: &EditReleaseArgs) -> Res
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
+    if args.discussion_category.is_some() {
+        eyre::bail!(NO_DISCUSSIONS);
+    }
     let notes = read_notes(&args.notes, &args.notes_file)?;
     let rel = fetch_release(&api, owner, repo, Some(&args.release)).await?;
     let id = rel
         .id
         .ok_or_else(|| eyre::eyre!("release {} has no id", args.release))?;
+
+    let draft = args.draft.unwrap_or(rel.draft.unwrap_or(false));
+    let prerelease = args.prerelease.unwrap_or(rel.prerelease.unwrap_or(false));
+    if args.latest == Some(true) && (draft || prerelease) {
+        eyre::bail!(
+            "--latest can't be used with a draft or prerelease: Gitea only treats published, non-prerelease releases as latest"
+        );
+    }
 
     if args.verify_tag {
         let tag = args.new_tag.as_deref().unwrap_or(&args.release);
@@ -1170,6 +1289,10 @@ async fn edit_release(repo_args: &repo::RepoArgs, args: &EditReleaseArgs) -> Res
         .into_inner();
 
     println!("{}", rel.html_url.as_deref().unwrap_or(""));
+
+    if let Some(want) = args.latest {
+        check_latest(&api, owner, repo, &rel, want).await?;
+    }
     Ok(())
 }
 
@@ -1180,7 +1303,7 @@ async fn upload_assets(repo_args: &repo::RepoArgs, args: &UploadArgs) -> Result<
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    check_files(&args.files)?;
+    let files = asset_paths(&args.files)?;
     let rel = fetch_release(&api, owner, repo, Some(&args.tag)).await?;
     let id = rel
         .id
@@ -1188,7 +1311,7 @@ async fn upload_assets(repo_args: &repo::RepoArgs, args: &UploadArgs) -> Result<
 
     // Assets each file would replace, by index into `args.files`.
     let mut existing = Vec::new();
-    for file in &args.files {
+    for file in &files {
         let name = file_name(file)?;
         let asset = rel
             .assets
@@ -1206,7 +1329,7 @@ async fn upload_assets(repo_args: &repo::RepoArgs, args: &UploadArgs) -> Result<
         }
     }
 
-    for (file, existing) in args.files.iter().zip(existing) {
+    for (file, existing) in files.iter().zip(existing) {
         if let Some((_, Some(asset_id))) = existing {
             api.repo_delete_release_attachment()
                 .owner(owner)

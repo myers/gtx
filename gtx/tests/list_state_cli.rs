@@ -52,3 +52,22 @@ fn milestone_list_sends_state() {
         assert!(q.contains(&format!("state={state}")), "{q}");
     }
 }
+
+/// Like gh, list and search commands take `-L` for `--limit`.
+#[test]
+fn list_commands_take_capital_l_for_limit() {
+    for cmd in [
+        &["repo", "list"][..],
+        &["issue", "list", "-R", "o/r"][..],
+        &["pr", "list", "-R", "o/r"][..],
+        &["search", "repos", "x"][..],
+        &["search", "issues", "x"][..],
+        &["search", "prs", "x"][..],
+    ] {
+        let server = FakeGitea::start(|_| "[]".into());
+        server.gtx().args(cmd).args(["-L", "5"]).assert().success();
+        let seen = server.seen();
+        assert!(seen.iter().any(|s| s.contains("limit=5")), "{cmd:?}: {seen:?}");
+        server.gtx().args(cmd).args(["-l", "5"]).assert().failure();
+    }
+}

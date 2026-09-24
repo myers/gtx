@@ -30,7 +30,7 @@ struct RepoSearchArgs {
     query: String,
 
     /// Maximum results
-    #[arg(short, long, default_value = "30")]
+    #[arg(short = 'L', long, default_value = "30")]
     limit: i64,
 
     #[command(flatten)]
@@ -51,7 +51,7 @@ struct IssueSearchArgs {
     owner: Option<String>,
 
     /// Maximum results
-    #[arg(short, long, default_value = "30")]
+    #[arg(short = 'L', long, default_value = "30")]
     limit: u64,
 
     #[command(flatten)]
@@ -64,7 +64,7 @@ struct UserSearchArgs {
     query: String,
 
     /// Maximum results
-    #[arg(short, long, default_value = "30")]
+    #[arg(short = 'L', long, default_value = "30")]
     limit: i64,
 
     #[command(flatten)]
