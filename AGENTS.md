@@ -25,3 +25,9 @@ Version + `--version` output also embeds the short git SHA and build date
 
 `gitea-api/Cargo.toml` doesn't get bumped per-commit — only when its public
 surface meaningfully changes.
+
+## Formatting
+
+Keep the workspace rustfmt-clean: run `cargo fmt --all` before committing.
+`gtx/tests/fmt.rs` fails `cargo test` otherwise (no CI). Formatting-only
+commits go in `.git-blame-ignore-revs`.
