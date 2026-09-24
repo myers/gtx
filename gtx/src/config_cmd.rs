@@ -110,7 +110,11 @@ fn list_config() -> Result<()> {
 /// way `auth status` shows them; `gtx auth token` prints the real one.
 fn flatten(prefix: &str, table: &toml::Table, out: &mut Vec<String>) {
     for (key, value) in table {
-        let full = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+        let full = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
         match value {
             toml::Value::Table(inner) => flatten(&full, inner, out),
             toml::Value::String(s) if key == "token" => {

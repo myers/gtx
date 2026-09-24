@@ -456,7 +456,11 @@ async fn list_releases(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()
 }
 
 /// The release Gitea considers latest (the newest published non-prerelease), if any.
-async fn latest_release(api: &gitea_api::Gitea, owner: &str, repo: &str) -> Result<Option<Release>> {
+async fn latest_release(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+) -> Result<Option<Release>> {
     match api
         .repo_get_latest_release()
         .owner(owner)
@@ -1034,7 +1038,11 @@ async fn download_release(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Re
     let tag = rel.tag_name.as_deref().unwrap_or("");
 
     let downloads = if let Some(format) = &args.archive {
-        let url = if format == "zip" { &rel.zipball_url } else { &rel.tarball_url };
+        let url = if format == "zip" {
+            &rel.zipball_url
+        } else {
+            &rel.tarball_url
+        };
         let url = url
             .clone()
             .ok_or_else(|| eyre::eyre!("Release {tag} has no {format} archive URL"))?;
@@ -1055,7 +1063,10 @@ async fn download_release(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> Re
                 .browser_download_url
                 .clone()
                 .ok_or_else(|| eyre::eyre!("Asset {name} has no download URL"))?;
-            downloads.push(Download { url, name: Some(name.to_string()) });
+            downloads.push(Download {
+                url,
+                name: Some(name.to_string()),
+            });
         }
         if downloads.is_empty() {
             if rel.assets.is_empty() {
@@ -1140,7 +1151,9 @@ fn destination(
     let mut parts = std::path::Path::new(name).components();
     match (parts.next(), parts.next()) {
         (Some(std::path::Component::Normal(_)), None) => Ok(Some(dir.join(name))),
-        _ => Err(eyre::eyre!("Refusing to download asset with unsafe name {name:?}")),
+        _ => Err(eyre::eyre!(
+            "Refusing to download asset with unsafe name {name:?}"
+        )),
     }
 }
 
@@ -1164,7 +1177,10 @@ fn should_write(args: &DownloadArgs, dest: Option<&std::path::Path>) -> Result<b
 
 /// The `filename` from a `Content-Disposition: attachment; filename="..."` header.
 fn content_disposition_filename(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    let value = headers.get(reqwest::header::CONTENT_DISPOSITION)?.to_str().ok()?;
+    let value = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)?
+        .to_str()
+        .ok()?;
     value.split(';').find_map(|part| {
         let name = part.trim().strip_prefix("filename=")?;
         Some(name.trim_matches('"').to_string()).filter(|n| !n.is_empty())

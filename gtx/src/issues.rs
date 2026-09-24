@@ -3,9 +3,9 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::json::{Field, field, gh};
-use gitea_api::types::{Issue, StateType};
 use crate::paginate;
 use crate::repo;
+use gitea_api::types::{Issue, StateType};
 
 #[derive(Args)]
 pub struct IssueCommand {
@@ -176,8 +176,12 @@ impl IssueCommand {
             IssueAction::View(args) => view_issue(&self.repo, args).await,
             IssueAction::Create(args) => create_issue(&self.repo, args).await,
             IssueAction::Delete(args) => delete_issue(&self.repo, args).await,
-            IssueAction::Close(args) => set_issue_state(self.repo.repo.as_deref(), args.number, "closed").await,
-            IssueAction::Reopen(args) => set_issue_state(self.repo.repo.as_deref(), args.number, "open").await,
+            IssueAction::Close(args) => {
+                set_issue_state(self.repo.repo.as_deref(), args.number, "closed").await
+            }
+            IssueAction::Reopen(args) => {
+                set_issue_state(self.repo.repo.as_deref(), args.number, "open").await
+            }
             IssueAction::Comment(args) => comment_issue(&self.repo, args).await,
             IssueAction::Edit(args) => edit_issue(&self.repo, args).await,
             IssueAction::Status(args) => status_issues(&self.repo, args).await,
@@ -268,7 +272,11 @@ async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
             }
             // Gitea's issues endpoint also returns PRs unless told otherwise; gh never lists them.
             req = req.type_(gitea_api::types::IssueListIssuesType::Issues);
-            Ok(req.send().await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?.into_inner())
+            Ok(req
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner())
         }
     })
     .await?;
@@ -287,10 +295,7 @@ async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
 
     // Header
     if is_tty {
-        println!(
-            "{:<6} {:<50} {:<20} {}",
-            "#", "TITLE", "LABELS", "UPDATED"
-        );
+        println!("{:<6} {:<50} {:<20} {}", "#", "TITLE", "LABELS", "UPDATED");
     }
 
     for issue in &issues {
@@ -373,20 +378,36 @@ async fn view_issue(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
         .to_lowercase();
 
     println!("{title} #{number}");
-    println!("{state} — opened by {} {}",
-        issue.user.as_ref().and_then(|u| u.login.as_deref()).unwrap_or("unknown"),
-        issue.created_at.map(|dt| relative_time(dt)).unwrap_or_default(),
+    println!(
+        "{state} — opened by {} {}",
+        issue
+            .user
+            .as_ref()
+            .and_then(|u| u.login.as_deref())
+            .unwrap_or("unknown"),
+        issue
+            .created_at
+            .map(|dt| relative_time(dt))
+            .unwrap_or_default(),
     );
 
     // Labels
     if !issue.labels.is_empty() {
-        let label_names: Vec<&str> = issue.labels.iter().filter_map(|l| l.name.as_deref()).collect();
+        let label_names: Vec<&str> = issue
+            .labels
+            .iter()
+            .filter_map(|l| l.name.as_deref())
+            .collect();
         println!("Labels: {}", label_names.join(", "));
     }
 
     // Assignees
     if !issue.assignees.is_empty() {
-        let names: Vec<&str> = issue.assignees.iter().filter_map(|u| u.login.as_deref()).collect();
+        let names: Vec<&str> = issue
+            .assignees
+            .iter()
+            .filter_map(|u| u.login.as_deref())
+            .collect();
         println!("Assignees: {}", names.join(", "));
     }
 
@@ -426,9 +447,17 @@ async fn view_issue(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
         if comments.is_empty() {
             println!("\nNo comments.");
         } else {
-            println!("\n--- {} comment{} ---", comments.len(), if comments.len() == 1 { "" } else { "s" });
+            println!(
+                "\n--- {} comment{} ---",
+                comments.len(),
+                if comments.len() == 1 { "" } else { "s" }
+            );
             for c in &comments {
-                let author = c.user.as_ref().and_then(|u| u.login.as_deref()).unwrap_or("unknown");
+                let author = c
+                    .user
+                    .as_ref()
+                    .and_then(|u| u.login.as_deref())
+                    .unwrap_or("unknown");
                 let when = c.created_at.map(|dt| relative_time(dt)).unwrap_or_default();
                 let body = c.body.as_deref().unwrap_or("");
                 println!("\n{author} ({when}):");
@@ -438,7 +467,10 @@ async fn view_issue(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     } else {
         let count = issue.comments.unwrap_or(0);
         if count > 0 {
-            println!("\n{count} comment{} (use -c to show)", if count == 1 { "" } else { "s" });
+            println!(
+                "\n{count} comment{} (use -c to show)",
+                if count == 1 { "" } else { "s" }
+            );
         }
     }
 
@@ -523,9 +555,16 @@ async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<(
     if let Some(ref base_dir) = body_file_dir {
         let refs = crate::body::find_local_refs(&input.body, base_dir);
         if !refs.is_empty() {
-            let new_body =
-                crate::body::upload_and_rewrite(&api, &config, owner, repo, number, &input.body, base_dir)
-                    .await?;
+            let new_body = crate::body::upload_and_rewrite(
+                &api,
+                &config,
+                owner,
+                repo,
+                number,
+                &input.body,
+                base_dir,
+            )
+            .await?;
             // Update issue body with rewritten URLs
             api.issue_edit_issue()
                 .owner(owner)
@@ -581,7 +620,9 @@ async fn interactive_create_issue(
     let title = inquire::Text::new("Title:")
         .with_validator(|s: &str| {
             if s.trim().is_empty() {
-                Ok(inquire::validator::Validation::Invalid("Title is required".into()))
+                Ok(inquire::validator::Validation::Invalid(
+                    "Title is required".into(),
+                ))
             } else {
                 Ok(inquire::validator::Validation::Valid)
             }
@@ -592,8 +633,8 @@ async fn interactive_create_issue(
     let body = crate::prompt::edit_body("")?;
 
     // 3. What's next?
-    let action = inquire::Select::new("What's next?", vec!["Submit", "Add metadata", "Cancel"])
-        .prompt()?;
+    let action =
+        inquire::Select::new("What's next?", vec!["Submit", "Add metadata", "Cancel"]).prompt()?;
 
     let mut label_ids = Vec::new();
     let mut assignees = Vec::new();
@@ -755,7 +796,11 @@ async fn edit_issue(repo_args: &repo::RepoArgs, args: &EditArgs) -> Result<()> {
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let mut builder = api.issue_edit_issue().owner(owner).repo(repo).index(args.number);
+    let mut builder = api
+        .issue_edit_issue()
+        .owner(owner)
+        .repo(repo)
+        .index(args.number);
 
     if args.title.is_some() || args.body.is_some() {
         let title = args.title.clone();

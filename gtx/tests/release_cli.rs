@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use common::{FakeGitea, Reply};
-use predicates::str::contains;
 use predicates::prelude::PredicateBooleanExt;
+use predicates::str::contains;
 
 /// A fresh, empty scratch directory unique to this test.
 fn scratch(name: &str) -> PathBuf {
@@ -468,7 +468,9 @@ fn release_view_json_uses_gh_field_names() {
 
     server
         .gtx()
-        .args(["release", "view", "-R", "o/r", "v1", "--json", "tagName", "-q", ".tagName"])
+        .args([
+            "release", "view", "-R", "o/r", "v1", "--json", "tagName", "-q", ".tagName",
+        ])
         .assert()
         .success()
         .stdout("v1\n");
@@ -852,7 +854,16 @@ fn list_server(latest: bool) -> FakeGitea {
                 let limit = param("limit").unwrap_or(30);
                 let page = param("page").unwrap_or(1);
                 let rows: Vec<&String> = all.iter().skip((page - 1) * limit).take(limit).collect();
-                (200, format!("[{}]", rows.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")))
+                (
+                    200,
+                    format!(
+                        "[{}]",
+                        rows.iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                )
             }
             "/api/v1/repos/o/r/releases/latest" if latest => (200, all[2].clone()),
             _ => (404, r#"{"message":"not found"}"#.into()),
@@ -969,7 +980,14 @@ fn release_create_notes_from_tag_uses_tag_message() {
     server
         .gtx()
         .args([
-            "release", "create", "-R", "o/r", "v1", "--notes-from-tag", "-n", "Intro",
+            "release",
+            "create",
+            "-R",
+            "o/r",
+            "v1",
+            "--notes-from-tag",
+            "-n",
+            "Intro",
         ])
         .assert()
         .success();
@@ -995,10 +1013,7 @@ fn release_create_notes_from_tag_needs_existing_tag() {
 
 #[test]
 fn release_create_rejects_generate_notes() {
-    for args in [
-        &["--generate-notes"][..],
-        &["--notes-start-tag", "v0"][..],
-    ] {
+    for args in [&["--generate-notes"][..], &["--notes-start-tag", "v0"][..]] {
         let server = tag_server();
         server
             .gtx()
@@ -1014,7 +1029,13 @@ fn release_create_rejects_generate_notes() {
     server
         .gtx()
         .args([
-            "release", "create", "-R", "o/r", "v1", "--notes-from-tag", "--generate-notes",
+            "release",
+            "create",
+            "-R",
+            "o/r",
+            "v1",
+            "--notes-from-tag",
+            "--generate-notes",
         ])
         .assert()
         .failure()
@@ -1045,9 +1066,7 @@ fn release_create_latest() {
         ("POST", "/api/v1/repos/o/r/releases") => {
             (201, r#"{"id":5,"tag_name":"v0","html_url":"u"}"#.into())
         }
-        ("GET", "/api/v1/repos/o/r/releases/latest") => {
-            (200, r#"{"id":4,"tag_name":"v1"}"#.into())
-        }
+        ("GET", "/api/v1/repos/o/r/releases/latest") => (200, r#"{"id":4,"tag_name":"v1"}"#.into()),
         _ => (404, "{}".into()),
     });
     server
@@ -1124,7 +1143,16 @@ fn release_list_json_uses_gh_field_names() {
     let server = list_server(true);
     server
         .gtx()
-        .args(["release", "list", "-R", "o/r", "--json", "tagName", "--jq", ".[].tagName"])
+        .args([
+            "release",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
+            "tagName",
+            "--jq",
+            ".[].tagName",
+        ])
         .assert()
         .success()
         .stdout("v4\nv3\nv2\nv1\n");
@@ -1135,11 +1163,11 @@ fn release_list_json_uses_gh_field_names() {
 /// `latest_id` the release Gitea reports as latest (`None`: no latest).
 fn edit_latest_server(latest_id: Option<u32>) -> FakeGitea {
     FakeGitea::start_with(move |method, target| {
-        let rel = |id: u32, tag: &str| format!(r#"{{"id":{id},"tag_name":"{tag}","html_url":"u"}}"#);
+        let rel =
+            |id: u32, tag: &str| format!(r#"{{"id":{id},"tag_name":"{tag}","html_url":"u"}}"#);
         match (method, target) {
-            ("GET", "/api/v1/repos/o/r/releases/tags/v1") | ("PATCH", "/api/v1/repos/o/r/releases/4") => {
-                (200, rel(4, "v1"))
-            }
+            ("GET", "/api/v1/repos/o/r/releases/tags/v1")
+            | ("PATCH", "/api/v1/repos/o/r/releases/4") => (200, rel(4, "v1")),
             ("GET", "/api/v1/repos/o/r/releases/latest") => match latest_id {
                 Some(4) => (200, rel(4, "v1")),
                 Some(id) => (200, rel(id, "v9")),
@@ -1195,7 +1223,10 @@ fn release_edit_latest() {
         .stderr(contains("v1 is still Gitea's latest release"));
 
     // Drafts and prereleases can't be latest: rejected before editing.
-    for args in [&["--latest", "--draft"][..], &["--latest", "--prerelease"][..]] {
+    for args in [
+        &["--latest", "--draft"][..],
+        &["--latest", "--prerelease"][..],
+    ] {
         let server = edit_latest_server(Some(4));
         server
             .gtx()
@@ -1203,7 +1234,9 @@ fn release_edit_latest() {
             .args(args)
             .assert()
             .failure()
-            .stderr(contains("--latest can't be used with a draft or prerelease"));
+            .stderr(contains(
+                "--latest can't be used with a draft or prerelease",
+            ));
         assert!(
             !server.seen().iter().any(|s| s.starts_with("PATCH")),
             "{:?}",
@@ -1219,7 +1252,15 @@ fn release_discussion_category_is_rejected() {
         let server = tag_server();
         server
             .gtx()
-            .args(["release", cmd, "-R", "o/r", "v1", "--discussion-category", "General"])
+            .args([
+                "release",
+                cmd,
+                "-R",
+                "o/r",
+                "v1",
+                "--discussion-category",
+                "General",
+            ])
             .assert()
             .failure()
             .stderr(contains("Gitea has no discussions"));
@@ -1240,7 +1281,10 @@ fn compare_server(latest: bool, ahead: u32) -> FakeGitea {
             let commits: Vec<String> = (0..ahead).map(|i| format!(r#"{{"sha":"{i}"}}"#)).collect();
             (
                 200,
-                format!(r#"{{"total_commits":{ahead},"commits":[{}]}}"#, commits.join(",")),
+                format!(
+                    r#"{{"total_commits":{ahead},"commits":[{}]}}"#,
+                    commits.join(",")
+                ),
             )
         }
         ("POST", "/api/v1/repos/o/r/releases") => {
@@ -1256,7 +1300,14 @@ fn release_create_fail_on_no_commits() {
     let server = compare_server(true, 0);
     server
         .gtx()
-        .args(["release", "create", "-R", "o/r", "v2", "--fail-on-no-commits"])
+        .args([
+            "release",
+            "create",
+            "-R",
+            "o/r",
+            "v2",
+            "--fail-on-no-commits",
+        ])
         .assert()
         .failure()
         .stderr(contains("no new commits since the last release: v1"));
@@ -1272,7 +1323,14 @@ fn release_create_fail_on_no_commits() {
     server
         .gtx()
         .args([
-            "release", "create", "-R", "o/r", "v2", "--fail-on-no-commits", "--target", "dev",
+            "release",
+            "create",
+            "-R",
+            "o/r",
+            "v2",
+            "--fail-on-no-commits",
+            "--target",
+            "dev",
         ])
         .assert()
         .success();
@@ -1287,7 +1345,14 @@ fn release_create_fail_on_no_commits() {
     let server = compare_server(false, 0);
     server
         .gtx()
-        .args(["release", "create", "-R", "o/r", "v2", "--fail-on-no-commits"])
+        .args([
+            "release",
+            "create",
+            "-R",
+            "o/r",
+            "v2",
+            "--fail-on-no-commits",
+        ])
         .assert()
         .success();
     assert!(!server.seen().iter().any(|s| s.contains("/compare/")));
@@ -1307,7 +1372,9 @@ fn release_asset_display_label_is_dropped_with_warning() {
         .args(["release", "upload", "-R", "o/r", "v1", "a.zip#My label"])
         .assert()
         .success()
-        .stderr(contains("Gitea release assets have no display label; ignoring \"My label\""));
+        .stderr(contains(
+            "Gitea release assets have no display label; ignoring \"My label\"",
+        ));
     assert!(
         server
             .seen()

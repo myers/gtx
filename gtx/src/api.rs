@@ -62,7 +62,9 @@ impl ApiCommand {
         let endpoint = self.expand_placeholders(&config)?;
 
         // Build the full URL using the API crate
-        let url: url::Url = api.url_for(&endpoint).parse()
+        let url: url::Url = api
+            .url_for(&endpoint)
+            .parse()
             .map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
 
         // Determine method
@@ -89,7 +91,14 @@ impl ApiCommand {
             let show_secrets = gitea_api::verbose::config()
                 .map(|c| c.show_secrets)
                 .unwrap_or(false);
-            let line = build_curl_command(&method, &url, &self.headers, body.as_ref(), &config.token, show_secrets);
+            let line = build_curl_command(
+                &method,
+                &url,
+                &self.headers,
+                body.as_ref(),
+                &config.token,
+                show_secrets,
+            );
             println!("{line}");
             return Ok(());
         }
@@ -138,7 +147,11 @@ impl ApiCommand {
         let resp = self.send_request(api, url, method, body).await?;
 
         if self.include {
-            println!("{} {}", resp.status().as_u16(), resp.status().canonical_reason().unwrap_or(""));
+            println!(
+                "{} {}",
+                resp.status().as_u16(),
+                resp.status().canonical_reason().unwrap_or("")
+            );
             for (key, value) in resp.headers() {
                 println!("{}: {}", key, value.to_str().unwrap_or(""));
             }
@@ -217,7 +230,8 @@ impl ApiCommand {
             headers.push((key.trim().to_string(), value.trim().to_string()));
         }
 
-        let method = method.parse::<gitea_api::Method>()
+        let method = method
+            .parse::<gitea_api::Method>()
             .map_err(|_| eyre::eyre!("Unsupported HTTP method: {method}"))?;
 
         let resp = api
@@ -231,7 +245,12 @@ impl ApiCommand {
             for line in auth_hint_for(status.as_u16(), &text) {
                 eprintln!("hint: {line}");
             }
-            eyre::bail!("{} {}\n{}", status.as_u16(), status.canonical_reason().unwrap_or(""), text);
+            eyre::bail!(
+                "{} {}\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                text
+            );
         }
 
         Ok(resp)
@@ -295,9 +314,7 @@ fn build_curl_command(
 /// vec for other status codes or unrecognized bodies.
 fn auth_hint_for(status: u16, body: &str) -> Vec<String> {
     match status {
-        401 => vec![
-            "token rejected by server. Run `gtx auth login` to refresh.".to_string(),
-        ],
+        401 => vec!["token rejected by server. Run `gtx auth login` to refresh.".to_string()],
         403 => {
             let message = serde_json::from_str::<serde_json::Value>(body)
                 .ok()
@@ -323,7 +340,11 @@ fn extract_required_scopes(message: &str) -> Option<String> {
     let rest = &message[start..];
     let end = rest.find(']')?;
     let scopes = rest[..end].trim();
-    if scopes.is_empty() { None } else { Some(scopes.to_string()) }
+    if scopes.is_empty() {
+        None
+    } else {
+        Some(scopes.to_string())
+    }
 }
 
 fn parse_key_value(s: &str) -> Result<(String, String)> {
@@ -340,8 +361,8 @@ fn parse_typed_value(s: &str) -> Result<serde_json::Value> {
             let content = std::io::read_to_string(std::io::stdin())?;
             return Ok(serde_json::Value::String(content));
         }
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| eyre::eyre!("Failed to read {path}: {e}"))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| eyre::eyre!("Failed to read {path}: {e}"))?;
         return Ok(serde_json::Value::String(content));
     }
 
@@ -380,10 +401,16 @@ mod tests {
         let url: url::Url = "https://gt.example/api/v1/user".parse().unwrap();
         let line = build_curl_command("GET", &url, &[], None, "aafe123456789a263", false);
         assert!(
-            line.contains(&format!("Authorization: token {}", gitea_api::verbose::REDACTED)),
+            line.contains(&format!(
+                "Authorization: token {}",
+                gitea_api::verbose::REDACTED
+            )),
             "got: {line}"
         );
-        assert!(!line.contains("aafe123456789a263"), "raw token leaked: {line}");
+        assert!(
+            !line.contains("aafe123456789a263"),
+            "raw token leaked: {line}"
+        );
         assert!(line.contains("curl -X GET"));
         assert!(line.contains("https://gt.example/api/v1/user"));
     }
@@ -392,12 +419,17 @@ mod tests {
     fn test_curl_show_secrets_emits_full_token() {
         let url: url::Url = "https://gt.example/api/v1/user".parse().unwrap();
         let line = build_curl_command("GET", &url, &[], None, "aafe123456789a263", true);
-        assert!(line.contains("Authorization: token aafe123456789a263"), "got: {line}");
+        assert!(
+            line.contains("Authorization: token aafe123456789a263"),
+            "got: {line}"
+        );
     }
 
     #[test]
     fn test_curl_includes_body_and_content_type() {
-        let url: url::Url = "https://gt.example/api/v1/repos/o/r/issues".parse().unwrap();
+        let url: url::Url = "https://gt.example/api/v1/repos/o/r/issues"
+            .parse()
+            .unwrap();
         let body = serde_json::json!({"title": "hi", "body": "what's up"});
         let line = build_curl_command("POST", &url, &[], Some(&body), "tok12345678abcd", false);
         assert!(line.contains("-X POST"));
@@ -411,7 +443,10 @@ mod tests {
         let url: url::Url = "https://gt.example/api/v1/x".parse().unwrap();
         let body = serde_json::json!({"msg": "it's fine"});
         let line = build_curl_command("POST", &url, &[], Some(&body), "tok12345678abcd", false);
-        assert!(line.contains(r"'\''"), "expected single-quote escape, got: {line}");
+        assert!(
+            line.contains(r"'\''"),
+            "expected single-quote escape, got: {line}"
+        );
     }
 
     #[test]
@@ -434,7 +469,10 @@ mod tests {
         let body = r#"{"message":"token does not have at least one of required scope(s), required=[read:admin], token scope=write:user","url":"https://gt.example/api/swagger"}"#;
         let hints = auth_hint_for(403, body);
         assert!(!hints.is_empty(), "expected hints for scope-shaped 403");
-        assert!(hints[0].contains("read:admin"), "expected hint to name missing scope, got {hints:?}");
+        assert!(
+            hints[0].contains("read:admin"),
+            "expected hint to name missing scope, got {hints:?}"
+        );
     }
 
     #[test]
@@ -466,7 +504,10 @@ mod tests {
     #[test]
     fn test_parse_typed_value() {
         assert_eq!(parse_typed_value("true").unwrap(), serde_json::json!(true));
-        assert_eq!(parse_typed_value("false").unwrap(), serde_json::json!(false));
+        assert_eq!(
+            parse_typed_value("false").unwrap(),
+            serde_json::json!(false)
+        );
         assert_eq!(parse_typed_value("null").unwrap(), serde_json::json!(null));
         assert_eq!(parse_typed_value("42").unwrap(), serde_json::json!(42));
         assert_eq!(

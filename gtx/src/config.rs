@@ -75,8 +75,7 @@ impl Config {
                 )
             })?;
 
-        let url =
-            url::Url::parse(&url_str).wrap_err_with(|| format!("Invalid URL: {url_str}"))?;
+        let url = url::Url::parse(&url_str).wrap_err_with(|| format!("Invalid URL: {url_str}"))?;
 
         Ok(Config { url, token })
     }
@@ -100,11 +99,7 @@ fn load_config_file() -> Option<ConfigFile> {
 
 pub fn config_path() -> Option<PathBuf> {
     let path = config_file().ok()?;
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 /// Path of the config file: `GTX_CONFIG` if set, else `config.toml` in the
@@ -132,7 +127,11 @@ fn migrate_config_dir(old: &Path, new: &Path) -> Result<()> {
         .wrap_err_with(|| format!("Migrating {} to {}", old.display(), new.display()))?;
     write_config_file(&new.join("config.toml"), content)
         .wrap_err_with(|| format!("Migrating {} to {}", old.display(), new.display()))?;
-    eprintln!("Migrated config from {} to {}", old.display(), new.display());
+    eprintln!(
+        "Migrated config from {} to {}",
+        old.display(),
+        new.display()
+    );
     Ok(())
 }
 
@@ -162,9 +161,7 @@ pub fn write_config_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> 
 
 /// Load aliases from config file. Returns empty map if no config or no aliases.
 pub fn load_aliases() -> HashMap<String, String> {
-    load_config_file()
-        .map(|c| c.aliases)
-        .unwrap_or_default()
+    load_config_file().map(|c| c.aliases).unwrap_or_default()
 }
 
 /// Read-modify-write the config file: parse it (a missing file is an empty
@@ -337,8 +334,11 @@ url = "https://gitea.example.com"
         let new = tmp.path().join("gtx");
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("config.toml"), "x").unwrap();
-        std::fs::set_permissions(old.join("config.toml"), std::fs::Permissions::from_mode(0o644))
-            .unwrap();
+        std::fs::set_permissions(
+            old.join("config.toml"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
 
         migrate_config_dir(&old, &new).unwrap();
 
@@ -456,10 +456,7 @@ token = "personal-token"
             config.servers["work"].url.as_deref(),
             Some("https://gitea.work.com")
         );
-        assert_eq!(
-            config.servers["work"].token.as_deref(),
-            Some("work-token")
-        );
+        assert_eq!(config.servers["work"].token.as_deref(), Some("work-token"));
         assert_eq!(
             config.servers["personal"].url.as_deref(),
             Some("https://my.gitea.org")

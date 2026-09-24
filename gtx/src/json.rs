@@ -15,7 +15,13 @@ pub struct JsonArgs {
 
     /// Format JSON output using a Go template; see "gh help formatting"
     /// (requires --json)
-    #[arg(short = 't', long, value_name = "STRING", requires = "json", conflicts_with = "jq_expr")]
+    #[arg(
+        short = 't',
+        long,
+        value_name = "STRING",
+        requires = "json",
+        conflicts_with = "jq_expr"
+    )]
     pub template: Option<String>,
 }
 
@@ -30,7 +36,11 @@ impl JsonArgs {
         };
         let mut names: Vec<&str> = fields.iter().map(|f| f.name).collect();
         names.sort_unstable();
-        let list = names.iter().map(|n| format!("  {n}")).collect::<Vec<_>>().join("\n");
+        let list = names
+            .iter()
+            .map(|n| format!("  {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         if requested.is_empty() {
             eyre::bail!("Specify one or more comma-separated fields for `--json`:\n{list}");
         }
@@ -135,9 +145,10 @@ pub mod gh {
 
     /// gh's user object: `{id, login, name}`.
     pub fn user(u: Option<&User>) -> Value {
-        u.map_or(Value::Null, |u| {
-            json!({"id": u.id, "login": u.login, "name": u.full_name.as_deref().unwrap_or("")})
-        })
+        u.map_or(
+            Value::Null,
+            |u| json!({"id": u.id, "login": u.login, "name": u.full_name.as_deref().unwrap_or("")}),
+        )
     }
 
     pub fn users(us: &[User]) -> Value {
@@ -215,11 +226,21 @@ pub fn jq_lines(value: &serde_json::Value, expr: &str) -> Result<Vec<String>> {
     let input = jaq_json::read::parse_single(serde_json::to_string(value)?.as_bytes())
         .map_err(|e| eyre::eyre!("jq input: {e}"))?;
 
-    let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
-    let funs = jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs());
+    let defs = jaq_core::defs()
+        .chain(jaq_std::defs())
+        .chain(jaq_json::defs());
+    let funs = jaq_core::funs()
+        .chain(jaq_std::funs())
+        .chain(jaq_json::funs());
     let arena = Arena::default();
     let modules = Loader::new(defs)
-        .load(&arena, File { code: expr, path: () })
+        .load(
+            &arena,
+            File {
+                code: expr,
+                path: (),
+            },
+        )
         .map_err(|_| eyre::eyre!("invalid jq expression: {expr}"))?;
     let filter = Compiler::default()
         .with_funs(funs)

@@ -67,7 +67,10 @@ fn list_commands_take_capital_l_for_limit() {
         let server = FakeGitea::start(|_| "[]".into());
         server.gtx().args(cmd).args(["-L", "5"]).assert().success();
         let seen = server.seen();
-        assert!(seen.iter().any(|s| s.contains("limit=5")), "{cmd:?}: {seen:?}");
+        assert!(
+            seen.iter().any(|s| s.contains("limit=5")),
+            "{cmd:?}: {seen:?}"
+        );
         server.gtx().args(cmd).args(["-l", "5"]).assert().failure();
     }
 }

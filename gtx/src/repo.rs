@@ -161,26 +161,33 @@ mod tests {
 
     #[test]
     fn test_parse_remote_url_https() {
-        let r = parse_remote_url("https://gitea.example.com/myorg/myrepo.git", "gitea.example.com")
-            .unwrap();
+        let r = parse_remote_url(
+            "https://gitea.example.com/myorg/myrepo.git",
+            "gitea.example.com",
+        )
+        .unwrap();
         assert_eq!(r.owner, "myorg");
         assert_eq!(r.name, "myrepo");
     }
 
     #[test]
     fn test_parse_remote_url_https_no_dotgit() {
-        let r =
-            parse_remote_url("https://gitea.example.com/myorg/myrepo", "gitea.example.com")
-                .unwrap();
+        let r = parse_remote_url(
+            "https://gitea.example.com/myorg/myrepo",
+            "gitea.example.com",
+        )
+        .unwrap();
         assert_eq!(r.owner, "myorg");
         assert_eq!(r.name, "myrepo");
     }
 
     #[test]
     fn test_parse_remote_url_ssh_scp() {
-        let r =
-            parse_remote_url("git@gitea.example.com:myorg/myrepo.git", "gitea.example.com")
-                .unwrap();
+        let r = parse_remote_url(
+            "git@gitea.example.com:myorg/myrepo.git",
+            "gitea.example.com",
+        )
+        .unwrap();
         assert_eq!(r.owner, "myorg");
         assert_eq!(r.name, "myrepo");
     }
@@ -215,8 +222,11 @@ mod tests {
 
     #[test]
     fn test_parse_remote_url_case_insensitive() {
-        let r = parse_remote_url("https://Gitea.Example.COM/myorg/myrepo.git", "gitea.example.com")
-            .unwrap();
+        let r = parse_remote_url(
+            "https://Gitea.Example.COM/myorg/myrepo.git",
+            "gitea.example.com",
+        )
+        .unwrap();
         assert_eq!(r.owner, "myorg");
         assert_eq!(r.name, "myrepo");
     }

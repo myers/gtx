@@ -14,7 +14,11 @@ fn runs_json(runs: &[(i64, &str, &str)]) -> String {
             )
         })
         .collect();
-    format!(r#"{{"total_count":{},"workflow_runs":[{}]}}"#, runs.len(), items.join(","))
+    format!(
+        r#"{{"total_count":{},"workflow_runs":[{}]}}"#,
+        runs.len(),
+        items.join(",")
+    )
 }
 
 #[test]
@@ -25,8 +29,23 @@ fn run_list_passes_filters_to_server() {
     server
         .gtx()
         .args([
-            "run", "list", "-R", "o/r", "--commit", sha, "--branch", "main", "--status",
-            "completed", "--event", "push", "--user", "alice", "--limit", "5", "--json",
+            "run",
+            "list",
+            "-R",
+            "o/r",
+            "--commit",
+            sha,
+            "--branch",
+            "main",
+            "--status",
+            "completed",
+            "--event",
+            "push",
+            "--user",
+            "alice",
+            "--limit",
+            "5",
+            "--json",
             "databaseId",
         ])
         .assert()
@@ -62,8 +81,16 @@ fn run_list_workflow_filters_client_side() {
     server
         .gtx()
         .args([
-            "run", "list", "-R", "o/r", "--workflow", ".forgejo/workflows/ci.yml", "--json",
-            "databaseId", "--jq", ".[].databaseId",
+            "run",
+            "list",
+            "-R",
+            "o/r",
+            "--workflow",
+            ".forgejo/workflows/ci.yml",
+            "--json",
+            "databaseId",
+            "--jq",
+            ".[].databaseId",
         ])
         .assert()
         .success()
@@ -73,11 +100,16 @@ fn run_list_workflow_filters_client_side() {
 /// `run list --json` takes gh's field names.
 #[test]
 fn run_list_json_uses_gh_field_names() {
-    let server = FakeGitea::start(|_| runs_json(&[(7, "abc", ".gitea/workflows/ci.yml@refs/heads/main")]));
+    let server =
+        FakeGitea::start(|_| runs_json(&[(7, "abc", ".gitea/workflows/ci.yml@refs/heads/main")]));
     let out = server
         .gtx()
         .args([
-            "run", "list", "-R", "o/r", "--json",
+            "run",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
             "databaseId,headSha,status,conclusion,displayTitle,workflowName",
         ])
         .assert()
@@ -129,7 +161,15 @@ fn run_watch_commit_watches_the_commits_runs() {
 
     server
         .gtx()
-        .args(["run", "watch", "-R", "o/r", "--commit", sha, "--exit-status"])
+        .args([
+            "run",
+            "watch",
+            "-R",
+            "o/r",
+            "--commit",
+            sha,
+            "--exit-status",
+        ])
         .assert()
         .code(1)
         .stderr(predicate::str::contains("Run #7"));
@@ -147,7 +187,9 @@ fn run_watch_commit_without_runs_errors() {
         .args(["run", "watch", "-R", "o/r", "--commit", "deadbeef"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("No workflow runs found for commit deadbeef"));
+        .stderr(predicate::str::contains(
+            "No workflow runs found for commit deadbeef",
+        ));
 }
 
 #[test]
@@ -173,7 +215,8 @@ fn zip_with(files: &[(&str, &str)]) -> Vec<u8> {
     buf.into_inner()
 }
 
-const ARTIFACTS: &str = r#"{"total_count":1,"artifacts":[{"id":5,"name":"logs","size_in_bytes":3,"expired":false}]}"#;
+const ARTIFACTS: &str =
+    r#"{"total_count":1,"artifacts":[{"id":5,"name":"logs","size_in_bytes":3,"expired":false}]}"#;
 const ARTIFACT_META: &str = r#"{"id":5,"name":"logs","size_in_bytes":3}"#;
 
 /// Gitea's `artifacts/{id}` is the metadata JSON; the bytes live at
@@ -261,6 +304,9 @@ fn run_download_withholds_token_from_foreign_redirect() {
         .assert()
         .success();
 
-    assert_eq!(std::fs::read_to_string(dir.path().join("logs/a.txt")).unwrap(), "x");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("logs/a.txt")).unwrap(),
+        "x"
+    );
     assert_eq!(blob.auth(), vec![None]);
 }

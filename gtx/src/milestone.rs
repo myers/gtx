@@ -2,11 +2,11 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
-use gitea_api::types::Milestone;
 use crate::issues::{atty_check, relative_time};
+use crate::json::{Field, field, gh};
 use crate::paginate;
 use crate::repo;
+use gitea_api::types::Milestone;
 
 #[derive(Args)]
 pub struct MilestoneCommand {
@@ -105,12 +105,20 @@ const MILESTONE_FIELDS: &[Field<Milestone>] = &[
     field("closedAt", |m| gh::time(m.closed_at)),
     field("closedIssues", |m| gh::v(m.closed_issues.unwrap_or(0))),
     field("createdAt", |m| gh::time(m.created_at)),
-    field("description", |m| gh::v(m.description.as_deref().unwrap_or(""))),
+    field("description", |m| {
+        gh::v(m.description.as_deref().unwrap_or(""))
+    }),
     field("dueOn", |m| gh::time(m.due_on)),
     field("number", |m| gh::v(m.id)),
     field("openIssues", |m| gh::v(m.open_issues.unwrap_or(0))),
     field("state", |m| {
-        gh::v(if matches!(m.state, Some(gitea_api::types::StateType::Closed)) { "CLOSED" } else { "OPEN" })
+        gh::v(
+            if matches!(m.state, Some(gitea_api::types::StateType::Closed)) {
+                "CLOSED"
+            } else {
+                "OPEN"
+            },
+        )
     }),
     field("title", |m| gh::v(&m.title)),
     field("updatedAt", |m| gh::time(m.updated_at)),

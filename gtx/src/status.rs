@@ -106,9 +106,7 @@ async fn fetch_notifications(api: &gitea_api::Gitea) -> Result<Vec<serde_json::V
     Ok(serde_json::from_str(&resp)?)
 }
 
-async fn fetch_assigned(
-    api: &gitea_api::Gitea,
-) -> Result<Vec<gitea_api::types::Issue>> {
+async fn fetch_assigned(api: &gitea_api::Gitea) -> Result<Vec<gitea_api::types::Issue>> {
     let issues = api
         .issue_search_issues()
         .assigned(true)
@@ -122,9 +120,7 @@ async fn fetch_assigned(
     Ok(issues)
 }
 
-async fn fetch_review_requests(
-    api: &gitea_api::Gitea,
-) -> Result<Vec<gitea_api::types::Issue>> {
+async fn fetch_review_requests(api: &gitea_api::Gitea) -> Result<Vec<gitea_api::types::Issue>> {
     let prs = api
         .issue_search_issues()
         .review_requested(true)

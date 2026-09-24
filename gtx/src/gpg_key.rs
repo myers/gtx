@@ -2,9 +2,9 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::issues::{atty_check, relative_time};
 use crate::json::{Field, field, gh};
 use gitea_api::types::GpgKey;
-use crate::issues::{atty_check, relative_time};
 
 #[derive(Args)]
 pub struct GpgKeyCommand {
@@ -54,8 +54,12 @@ impl GpgKeyCommand {
 /// camelCase like the rest).
 const KEY_FIELDS: &[Field<GpgKey>] = &[
     field("canCertify", |k| gh::v(k.can_certify.unwrap_or(false))),
-    field("canEncryptComms", |k| gh::v(k.can_encrypt_comms.unwrap_or(false))),
-    field("canEncryptStorage", |k| gh::v(k.can_encrypt_storage.unwrap_or(false))),
+    field("canEncryptComms", |k| {
+        gh::v(k.can_encrypt_comms.unwrap_or(false))
+    }),
+    field("canEncryptStorage", |k| {
+        gh::v(k.can_encrypt_storage.unwrap_or(false))
+    }),
     field("canSign", |k| gh::v(k.can_sign.unwrap_or(false))),
     field("createdAt", |k| gh::time(k.created_at)),
     field("emails", |k| {

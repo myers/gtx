@@ -89,10 +89,7 @@ pub fn expand_alias(expansion: &str, args: &[String]) -> Vec<String> {
     }
 
     // Split the expansion into tokens
-    let mut tokens: Vec<String> = result
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
+    let mut tokens: Vec<String> = result.split_whitespace().map(|s| s.to_string()).collect();
 
     // Append unused args
     for (i, arg) in args.iter().enumerate() {

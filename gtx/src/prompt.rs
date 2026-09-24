@@ -7,9 +7,7 @@ pub fn edit_body(initial: &str) -> Result<String> {
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
 
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".md")
-        .tempfile()?;
+    let mut tmp = tempfile::Builder::new().suffix(".md").tempfile()?;
     std::io::Write::write_all(&mut tmp, initial.as_bytes())?;
     let path = tmp.path().to_path_buf();
 

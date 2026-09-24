@@ -16,7 +16,12 @@ const EXISTS: &str =
 /// A status the spec documents for the operation (progenitor's `ErrorResponse`).
 #[test]
 fn documented_error_status_shows_server_message() {
-    let server = FakeGitea::start_with(|_, _| (404, r#"{"message":"issue does not exist [id: 0, repo_id: 1, index: 99]","url":"x"}"#.into()));
+    let server = FakeGitea::start_with(|_, _| {
+        (
+            404,
+            r#"{"message":"issue does not exist [id: 0, repo_id: 1, index: 99]","url":"x"}"#.into(),
+        )
+    });
     let url = format!("{}/api/v1/repos/o/r/issues/99", server.url);
     server
         .gtx()
@@ -34,7 +39,9 @@ fn undocumented_error_status_shows_server_message() {
     let server = FakeGitea::start_with(|_, _| (409, EXISTS.into()));
     server
         .gtx()
-        .args(["label", "create", "-R", "o/r", "--name", "bug", "--color", "ff0000"])
+        .args([
+            "label", "create", "-R", "o/r", "--name", "bug", "--color", "ff0000",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("HTTP 409: label already exists ("));
@@ -74,13 +81,16 @@ fn empty_error_body_falls_back_to_reason() {
 /// Hand-rolled request path (`raw_request`).
 #[test]
 fn raw_request_error_shows_server_message() {
-    let server = FakeGitea::start_with(|_, _| (403, r#"{"message":"user should be an owner"}"#.into()));
+    let server =
+        FakeGitea::start_with(|_, _| (403, r#"{"message":"user should be an owner"}"#.into()));
     server
         .gtx()
         .args(["runner", "registration-token", "-R", "o/r"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("HTTP 403: user should be an owner"));
+        .stderr(predicate::str::contains(
+            "HTTP 403: user should be an owner",
+        ));
 }
 
 /// `Gitea::download` path (release asset).
@@ -110,6 +120,8 @@ fn release_download_error_shows_server_message() {
         .args(["release", "download", "-R", "o/r", "4"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("HTTP 404: attachment does not exist"));
+        .stderr(predicate::str::contains(
+            "HTTP 404: attachment does not exist",
+        ));
     let _ = std::fs::remove_dir_all(&dir);
 }

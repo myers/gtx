@@ -280,8 +280,8 @@ impl Gitea {
     /// this instance's origin, so the token never goes to a foreign host.
     pub async fn download(&self, url: &str) -> Result<reqwest::Response, GiteaError> {
         let mut req = self.reqwest_client.get(url).build()?;
-        let same_origin = url::Url::parse(&self.base_url)
-            .is_ok_and(|base| base.origin() == req.url().origin());
+        let same_origin =
+            url::Url::parse(&self.base_url).is_ok_and(|base| base.origin() == req.url().origin());
         if same_origin {
             verbose::apply_auth_headers(&mut req);
         }

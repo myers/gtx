@@ -2,10 +2,10 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
-use gitea_api::types::ActionWorkflow;
 use crate::issues::atty_check;
+use crate::json::{Field, field, gh};
 use crate::repo;
+use gitea_api::types::ActionWorkflow;
 
 #[derive(Args)]
 pub struct WorkflowCommand {
@@ -136,8 +136,7 @@ async fn run_workflow(repo_args: &repo::RepoArgs, args: &RunArgs) -> Result<()> 
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let inputs: std::collections::HashMap<String, String> =
-        args.input.iter().cloned().collect();
+    let inputs: std::collections::HashMap<String, String> = args.input.iter().cloned().collect();
 
     // Without return_run_details the server answers 204 No Content. Servers
     // too old to know the parameter still do, so an empty success body means
@@ -164,7 +163,10 @@ async fn run_workflow(repo_args: &repo::RepoArgs, args: &RunArgs) -> Result<()> 
     };
 
     if let Some(run_id) = result.as_ref().and_then(|r| r.workflow_run_id) {
-        let url = result.as_ref().and_then(|r| r.html_url.as_deref()).unwrap_or("");
+        let url = result
+            .as_ref()
+            .and_then(|r| r.html_url.as_deref())
+            .unwrap_or("");
         eprintln!("Triggered workflow '{}' → run #{run_id}", args.workflow);
         if !url.is_empty() {
             eprintln!("{url}");

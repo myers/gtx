@@ -2,10 +2,10 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
-use gitea_api::types::Organization;
 use crate::issues::atty_check;
+use crate::json::{Field, field, gh};
 use crate::paginate;
+use gitea_api::types::Organization;
 
 #[derive(Args)]
 pub struct OrgCommand {
@@ -67,7 +67,9 @@ impl OrgCommand {
 /// with gh's `login` for the org's username and `name` for its full name).
 const ORG_FIELDS: &[Field<Organization>] = &[
     field("avatarUrl", |o| gh::v(&o.avatar_url)),
-    field("description", |o| gh::v(o.description.as_deref().unwrap_or(""))),
+    field("description", |o| {
+        gh::v(o.description.as_deref().unwrap_or(""))
+    }),
     field("email", |o| gh::v(o.email.as_deref().unwrap_or(""))),
     field("id", |o| gh::v(o.id)),
     field("location", |o| gh::v(o.location.as_deref().unwrap_or(""))),

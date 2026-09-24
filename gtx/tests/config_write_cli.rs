@@ -55,14 +55,24 @@ fn assert_preserved(content: &str) {
 fn auth_login_preserves_other_sections() {
     let (_dir, path) = setup();
     gtx(&path)
-        .args(["auth", "login", "--url", "https://new.example.com", "--token", "new-token"])
+        .args([
+            "auth",
+            "login",
+            "--url",
+            "https://new.example.com",
+            "--token",
+            "new-token",
+        ])
         .assert()
         .success();
 
     let content = read(&path);
     assert_preserved(&content);
     let parsed: toml::Table = content.parse().unwrap();
-    assert_eq!(parsed["default"]["url"].as_str(), Some("https://new.example.com"));
+    assert_eq!(
+        parsed["default"]["url"].as_str(),
+        Some("https://new.example.com")
+    );
     assert_eq!(parsed["default"]["token"].as_str(), Some("new-token"));
     assert!(!content.contains("old-token"), "{content}");
 }
@@ -72,12 +82,22 @@ fn auth_login_creates_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sub").join("config.toml");
     gtx(&path)
-        .args(["auth", "login", "--url", "https://new.example.com", "--token", "a\"b"])
+        .args([
+            "auth",
+            "login",
+            "--url",
+            "https://new.example.com",
+            "--token",
+            "a\"b",
+        ])
         .assert()
         .success();
 
     let parsed: toml::Table = read(&path).parse().unwrap();
-    assert_eq!(parsed["default"]["url"].as_str(), Some("https://new.example.com"));
+    assert_eq!(
+        parsed["default"]["url"].as_str(),
+        Some("https://new.example.com")
+    );
     assert_eq!(parsed["default"]["token"].as_str(), Some("a\"b"));
 }
 
@@ -104,7 +124,10 @@ fn config_set_preserves_other_sections() {
     assert_preserved(&content);
     assert!(content.contains(r#"token = "old-token""#), "{content}");
     let parsed: toml::Table = content.parse().unwrap();
-    assert_eq!(parsed["default"]["url"].as_str(), Some("https://set.example.com"));
+    assert_eq!(
+        parsed["default"]["url"].as_str(),
+        Some("https://set.example.com")
+    );
 }
 
 #[test]
@@ -118,7 +141,10 @@ fn alias_set_and_delete_preserve_other_sections() {
     assert_preserved(&content);
     assert!(content.contains(r#"iv = "issue view""#), "{content}");
 
-    gtx(&path).args(["alias", "delete", "iv"]).assert().success();
+    gtx(&path)
+        .args(["alias", "delete", "iv"])
+        .assert()
+        .success();
     let content = read(&path);
     assert_preserved(&content);
     assert!(!content.contains("iv ="), "{content}");
@@ -136,7 +162,14 @@ fn writers_refuse_to_clobber_invalid_config() {
         .assert()
         .failure();
     gtx(&path)
-        .args(["auth", "login", "--url", "https://x.example.com", "--token", "t"])
+        .args([
+            "auth",
+            "login",
+            "--url",
+            "https://x.example.com",
+            "--token",
+            "t",
+        ])
         .assert()
         .failure();
     assert_eq!(read(&path), "not valid toml {{{{\n");
@@ -146,7 +179,12 @@ fn writers_refuse_to_clobber_invalid_config() {
 fn config_set_nested_key_creates_server_profile() {
     let (_dir, path) = setup();
     gtx(&path)
-        .args(["config", "set", "servers.home.url", "https://home.example.com"])
+        .args([
+            "config",
+            "set",
+            "servers.home.url",
+            "https://home.example.com",
+        ])
         .assert()
         .success();
     gtx(&path)
@@ -159,9 +197,18 @@ fn config_set_nested_key_creates_server_profile() {
     assert!(!content.contains("[servers]\n"), "{content}");
     assert!(content.contains("# my gtx config"), "{content}");
     let parsed: toml::Table = content.parse().unwrap();
-    assert_eq!(parsed["servers"]["home"]["url"].as_str(), Some("https://home.example.com"));
-    assert_eq!(parsed["servers"]["work"]["url"].as_str(), Some("https://new.work.com"));
-    assert_eq!(parsed["servers"]["work"]["token"].as_str(), Some("work-token"));
+    assert_eq!(
+        parsed["servers"]["home"]["url"].as_str(),
+        Some("https://home.example.com")
+    );
+    assert_eq!(
+        parsed["servers"]["work"]["url"].as_str(),
+        Some("https://new.work.com")
+    );
+    assert_eq!(
+        parsed["servers"]["work"]["token"].as_str(),
+        Some("work-token")
+    );
 
     gtx(&path)
         .args(["config", "get", "servers.home.url"])
@@ -174,7 +221,10 @@ fn config_set_nested_key_creates_server_profile() {
 fn config_set_rejects_bad_keys() {
     let (_dir, path) = setup();
     for key in ["default.url.x", "a..b", ".a", "a."] {
-        gtx(&path).args(["config", "set", key, "v"]).assert().failure();
+        gtx(&path)
+            .args(["config", "set", key, "v"])
+            .assert()
+            .failure();
     }
     assert_eq!(read(&path), EXISTING);
 }
@@ -185,8 +235,14 @@ fn config_list_recurses_and_masks_tokens() {
     let out = gtx(&path).args(["config", "list"]).output().unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("default.url = https://old.example.com\n"), "{stdout}");
-    assert!(stdout.contains("servers.work.url = https://gitea.work.com\n"), "{stdout}");
+    assert!(
+        stdout.contains("default.url = https://old.example.com\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("servers.work.url = https://gitea.work.com\n"),
+        "{stdout}"
+    );
     assert!(stdout.contains("servers.work.token = "), "{stdout}");
     assert!(stdout.contains("default.token = "), "{stdout}");
     assert!(stdout.contains("aliases.co = pr checkout\n"), "{stdout}");
@@ -194,7 +250,10 @@ fn config_list_recurses_and_masks_tokens() {
     assert!(!stdout.contains("work-token"), "{stdout}");
     // gh-style: no prefix underscore, so every character is starred.
     assert!(stdout.contains("default.token = *********\n"), "{stdout}");
-    assert!(stdout.contains("servers.work.token = **********\n"), "{stdout}");
+    assert!(
+        stdout.contains("servers.work.token = **********\n"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -245,7 +304,11 @@ fn auth_status_show_token_prints_full_token() {
 #[test]
 fn auth_token_prints_resolved_token() {
     let (_dir, path) = setup();
-    gtx(&path).args(["auth", "token"]).assert().success().stdout("old-token\n");
+    gtx(&path)
+        .args(["auth", "token"])
+        .assert()
+        .success()
+        .stdout("old-token\n");
     gtx(&path)
         .env("GITEA_SERVER", "work")
         .args(["auth", "token"])

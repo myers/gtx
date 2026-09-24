@@ -2,9 +2,9 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::issues::{atty_check, relative_time};
 use crate::json::{Field, field, gh};
 use serde_json::Value;
-use crate::issues::{atty_check, relative_time};
 
 #[derive(Args)]
 pub struct NotificationCommand {
@@ -53,8 +53,15 @@ fn str_at<'a>(v: &'a Value, path: &str) -> Option<&'a str> {
 /// rest). Built from the raw notification-thread JSON.
 const NOTIFICATION_FIELDS: &[Field<Value>] = &[
     field("id", |n| n.get("id").cloned().unwrap_or(Value::Null)),
-    field("pinned", |n| gh::v(n.get("pinned").and_then(Value::as_bool).unwrap_or(false))),
-    field("repository", |n| gh::repo_ref(str_at(n, "/repository/name"), str_at(n, "/repository/full_name"))),
+    field("pinned", |n| {
+        gh::v(n.get("pinned").and_then(Value::as_bool).unwrap_or(false))
+    }),
+    field("repository", |n| {
+        gh::repo_ref(
+            str_at(n, "/repository/name"),
+            str_at(n, "/repository/full_name"),
+        )
+    }),
     field("subject", |n| {
         serde_json::json!({
             "title": str_at(n, "/subject/title").unwrap_or(""),
@@ -63,7 +70,9 @@ const NOTIFICATION_FIELDS: &[Field<Value>] = &[
             "url": str_at(n, "/subject/html_url").unwrap_or(""),
         })
     }),
-    field("unread", |n| gh::v(n.get("unread").and_then(Value::as_bool).unwrap_or(false))),
+    field("unread", |n| {
+        gh::v(n.get("unread").and_then(Value::as_bool).unwrap_or(false))
+    }),
     field("updatedAt", |n| {
         gh::time(
             str_at(n, "/updated_at")
@@ -113,9 +122,7 @@ async fn list_notifications(args: &ListArgs) -> Result<()> {
             " "
         };
 
-        let repo_name = n["repository"]["full_name"]
-            .as_str()
-            .unwrap_or("");
+        let repo_name = n["repository"]["full_name"].as_str().unwrap_or("");
         let truncated_repo = if repo_name.len() > 23 {
             format!("{}...", &repo_name[..20])
         } else {
@@ -146,7 +153,11 @@ async fn list_notifications(args: &ListArgs) -> Result<()> {
 
         println!(
             "{:<6} {unread}{:<7} {:<25} {:<40} {}",
-            id, subject_type, truncated_repo, format!("{truncated_title}{state_indicator}"), updated
+            id,
+            subject_type,
+            truncated_repo,
+            format!("{truncated_title}{state_indicator}"),
+            updated
         );
     }
 

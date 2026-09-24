@@ -2,11 +2,11 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
-use gitea_api::types::Label;
 use crate::issues::atty_check;
+use crate::json::{Field, field, gh};
 use crate::paginate;
 use crate::repo;
+use gitea_api::types::Label;
 
 #[derive(Args)]
 pub struct LabelCommand {
@@ -98,7 +98,9 @@ impl LabelCommand {
 /// "default" flag). Gitea has no GraphQL node IDs, so `id` is numeric.
 const LABEL_FIELDS: &[Field<Label>] = &[
     field("color", |l| gh::v(&l.color)),
-    field("description", |l| gh::v(l.description.as_deref().unwrap_or(""))),
+    field("description", |l| {
+        gh::v(l.description.as_deref().unwrap_or(""))
+    }),
     field("id", |l| gh::v(l.id)),
     field("name", |l| gh::v(&l.name)),
     field("url", |l| gh::v(&l.url)),
@@ -140,7 +142,10 @@ async fn list_labels(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
 
     let is_tty = atty_check();
     if is_tty {
-        println!("{:<6} {:<30} {:<10} {}", "ID", "NAME", "COLOR", "DESCRIPTION");
+        println!(
+            "{:<6} {:<30} {:<10} {}",
+            "ID", "NAME", "COLOR", "DESCRIPTION"
+        );
     }
 
     for label in &labels {
@@ -274,10 +279,8 @@ async fn clone_labels(repo_args: &repo::RepoArgs, args: &CloneArgs) -> Result<()
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    let existing_names: std::collections::HashSet<String> = existing
-        .iter()
-        .filter_map(|l| l.name.clone())
-        .collect();
+    let existing_names: std::collections::HashSet<String> =
+        existing.iter().filter_map(|l| l.name.clone()).collect();
 
     let mut created = 0;
     let mut skipped = 0;

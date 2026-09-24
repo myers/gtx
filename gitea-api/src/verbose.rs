@@ -79,7 +79,11 @@ pub fn mask_header_value(name: &str, value: &str) -> String {
             Some((scheme, _)) => format!("{scheme} {REDACTED}"),
             None => REDACTED.to_string(),
         },
-        "cookie" => value.split("; ").map(mask_cookie_pair).collect::<Vec<_>>().join("; "),
+        "cookie" => value
+            .split("; ")
+            .map(mask_cookie_pair)
+            .collect::<Vec<_>>()
+            .join("; "),
         "set-cookie" => match value.split_once(';') {
             Some((pair, attrs)) => format!("{};{attrs}", mask_cookie_pair(pair)),
             None => mask_cookie_pair(value),
@@ -274,7 +278,10 @@ mod tests {
             format!("token {REDACTED}"),
         );
         assert_eq!(mask_header_value("X-Csrf-Token", "ééééééééé"), REDACTED);
-        assert_eq!(mask_header_value("Cookie", "é=ééééééé"), format!("é={REDACTED}"));
+        assert_eq!(
+            mask_header_value("Cookie", "é=ééééééé"),
+            format!("é={REDACTED}")
+        );
     }
 
     #[test]
@@ -295,26 +302,44 @@ mod tests {
 
     #[test]
     fn mask_x_token_header() {
-        assert_eq!(mask_header_value("X-Csrf-Token", "abcdef1234567890"), REDACTED);
+        assert_eq!(
+            mask_header_value("X-Csrf-Token", "abcdef1234567890"),
+            REDACTED
+        );
     }
 
     #[test]
     fn mask_skips_non_secret_headers() {
-        assert_eq!(mask_header_value("Accept", "application/json"), "application/json");
-        assert_eq!(mask_header_value("Content-Type", "application/json"), "application/json");
+        assert_eq!(
+            mask_header_value("Accept", "application/json"),
+            "application/json"
+        );
+        assert_eq!(
+            mask_header_value("Content-Type", "application/json"),
+            "application/json"
+        );
     }
 
     #[test]
     fn config_levels() {
-        let off = VerboseConfig { level: 0, show_secrets: false };
+        let off = VerboseConfig {
+            level: 0,
+            show_secrets: false,
+        };
         assert!(!off.is_on());
         assert!(!off.show_body());
 
-        let v = VerboseConfig { level: 1, show_secrets: false };
+        let v = VerboseConfig {
+            level: 1,
+            show_secrets: false,
+        };
         assert!(v.is_on());
         assert!(!v.show_body());
 
-        let vv = VerboseConfig { level: 2, show_secrets: false };
+        let vv = VerboseConfig {
+            level: 2,
+            show_secrets: false,
+        };
         assert!(vv.is_on());
         assert!(vv.show_body());
     }

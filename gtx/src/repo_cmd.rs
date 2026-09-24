@@ -2,11 +2,11 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
-use gitea_api::types::{DeployKey, Repository};
 use crate::issues::{atty_check, relative_time};
+use crate::json::{Field, field, gh};
 use crate::paginate;
 use crate::repo;
+use gitea_api::types::{DeployKey, Repository};
 
 #[derive(Args)]
 pub struct RepoCommand {
@@ -230,21 +230,35 @@ async fn view_repo(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
 }
 
 fn owner_ref(u: Option<&gitea_api::types::User>) -> serde_json::Value {
-    u.map_or(serde_json::Value::Null, |u| serde_json::json!({"id": u.id, "login": u.login}))
+    u.map_or(
+        serde_json::Value::Null,
+        |u| serde_json::json!({"id": u.id, "login": u.login}),
+    )
 }
 
 /// gh's `repo view/list --json` fields that Gitea's repository data can
 /// answer. Gitea has no GraphQL node IDs, so `id` is the numeric ID.
 const REPO_FIELDS: &[Field<Repository>] = &[
-    field("archivedAt", |r| gh::time(r.archived_at.filter(|_| r.archived.unwrap_or(false)))),
+    field("archivedAt", |r| {
+        gh::time(r.archived_at.filter(|_| r.archived.unwrap_or(false)))
+    }),
     field("createdAt", |r| gh::time(r.created_at)),
-    field("defaultBranchRef", |r| serde_json::json!({"name": r.default_branch.as_deref().unwrap_or("")})),
-    field("deleteBranchOnMerge", |r| gh::v(r.default_delete_branch_after_merge.unwrap_or(false))),
-    field("description", |r| gh::v(r.description.as_deref().unwrap_or(""))),
+    field(
+        "defaultBranchRef",
+        |r| serde_json::json!({"name": r.default_branch.as_deref().unwrap_or("")}),
+    ),
+    field("deleteBranchOnMerge", |r| {
+        gh::v(r.default_delete_branch_after_merge.unwrap_or(false))
+    }),
+    field("description", |r| {
+        gh::v(r.description.as_deref().unwrap_or(""))
+    }),
     field("diskUsage", |r| gh::v(r.size)),
     field("forkCount", |r| gh::v(r.forks_count.unwrap_or(0))),
     field("hasIssuesEnabled", |r| gh::v(r.has_issues.unwrap_or(false))),
-    field("hasProjectsEnabled", |r| gh::v(r.has_projects.unwrap_or(false))),
+    field("hasProjectsEnabled", |r| {
+        gh::v(r.has_projects.unwrap_or(false))
+    }),
     field("hasWikiEnabled", |r| gh::v(r.has_wiki.unwrap_or(false))),
     field("homepageUrl", |r| gh::v(r.website.as_deref().unwrap_or(""))),
     field("id", |r| gh::v(r.id)),
@@ -254,8 +268,17 @@ const REPO_FIELDS: &[Field<Repository>] = &[
     field("isMirror", |r| gh::v(r.mirror.unwrap_or(false))),
     field("isPrivate", |r| gh::v(r.private.unwrap_or(false))),
     field("isTemplate", |r| gh::v(r.template.unwrap_or(false))),
-    field("mergeCommitAllowed", |r| gh::v(r.allow_merge_commits.unwrap_or(false))),
-    field("mirrorUrl", |r| gh::v(r.original_url.as_deref().filter(|_| r.mirror.unwrap_or(false)).unwrap_or(""))),
+    field("mergeCommitAllowed", |r| {
+        gh::v(r.allow_merge_commits.unwrap_or(false))
+    }),
+    field("mirrorUrl", |r| {
+        gh::v(
+            r.original_url
+                .as_deref()
+                .filter(|_| r.mirror.unwrap_or(false))
+                .unwrap_or(""),
+        )
+    }),
     field("name", |r| gh::v(&r.name)),
     field("nameWithOwner", |r| gh::v(&r.full_name)),
     field("owner", |r| owner_ref(r.owner.as_ref())),
@@ -270,11 +293,20 @@ const REPO_FIELDS: &[Field<Repository>] = &[
             .filter(|l| !l.is_empty())
             .map_or(serde_json::Value::Null, |l| serde_json::json!({"name": l}))
     }),
-    field("rebaseMergeAllowed", |r| gh::v(r.allow_rebase.unwrap_or(false))),
-    field("repositoryTopics", |r| {
-        serde_json::Value::Array(r.topics.iter().map(|t| serde_json::json!({"name": t})).collect())
+    field("rebaseMergeAllowed", |r| {
+        gh::v(r.allow_rebase.unwrap_or(false))
     }),
-    field("squashMergeAllowed", |r| gh::v(r.allow_squash_merge.unwrap_or(false))),
+    field("repositoryTopics", |r| {
+        serde_json::Value::Array(
+            r.topics
+                .iter()
+                .map(|t| serde_json::json!({"name": t}))
+                .collect(),
+        )
+    }),
+    field("squashMergeAllowed", |r| {
+        gh::v(r.allow_squash_merge.unwrap_or(false))
+    }),
     field("sshUrl", |r| gh::v(&r.ssh_url)),
     field("stargazerCount", |r| gh::v(r.stars_count.unwrap_or(0))),
     field("updatedAt", |r| gh::time(r.updated_at)),
@@ -299,7 +331,10 @@ const REPO_FIELDS: &[Field<Repository>] = &[
             "PUBLIC"
         })
     }),
-    field("watchers", |r| serde_json::json!({"totalCount": r.watchers_count.unwrap_or(0)})),
+    field(
+        "watchers",
+        |r| serde_json::json!({"totalCount": r.watchers_count.unwrap_or(0)}),
+    ),
 ];
 
 async fn list_repos(args: &ListArgs) -> Result<()> {
@@ -358,10 +393,7 @@ async fn list_repos(args: &ListArgs) -> Result<()> {
     for r in &repos {
         let name = r.full_name.as_deref().unwrap_or("");
         let stars = r.stars_count.unwrap_or(0);
-        let updated = r
-            .updated_at
-            .map(|dt| relative_time(dt))
-            .unwrap_or_default();
+        let updated = r.updated_at.map(|dt| relative_time(dt)).unwrap_or_default();
         println!("{:<40} {:<10} {}", name, stars, updated);
     }
 
@@ -414,7 +446,10 @@ async fn create_repo(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()
     let api = config.client()?;
 
     let body = |mut b: gitea_api::types::builder::CreateRepoOption| {
-        b = b.name(name.to_string()).private(args.private).auto_init(true);
+        b = b
+            .name(name.to_string())
+            .private(args.private)
+            .auto_init(true);
         if let Some(desc) = &args.description {
             b = b.description(desc.clone());
         }
@@ -609,7 +644,10 @@ async fn deploy_key_list(repo_args: &repo::RepoArgs, args: &DeployKeyListArgs) -
 
     let is_tty = atty_check();
     if is_tty {
-        println!("{:<6} {:<30} {:<10} {}", "ID", "TITLE", "ACCESS", "FINGERPRINT");
+        println!(
+            "{:<6} {:<30} {:<10} {}",
+            "ID", "TITLE", "ACCESS", "FINGERPRINT"
+        );
     }
 
     for key in &keys {
@@ -703,7 +741,10 @@ mod tests {
     #[test]
     fn create_name_rejects_malformed() {
         for bad in ["", "/x", "x/", "a/b/c"] {
-            assert!(split_create_name(bad).is_err(), "{bad:?} should be rejected");
+            assert!(
+                split_create_name(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 }

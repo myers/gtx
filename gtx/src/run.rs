@@ -3,14 +3,20 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
-use crate::repo;
 use crate::json::{Field, field, gh};
+use crate::repo;
 use gitea_api::types::ActionWorkflowRun;
 
 fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
-        "completed" | "success" | "failure" | "cancelled" | "skipped" | "timed_out" | "action_required",
+        "completed"
+            | "success"
+            | "failure"
+            | "cancelled"
+            | "skipped"
+            | "timed_out"
+            | "action_required",
     )
 }
 
@@ -124,8 +130,10 @@ fn job_is_fully_green(job: &gitea_api::types::ActionWorkflowJob) -> bool {
 fn step_is_hidden_in_compact(step: &gitea_api::types::ActionWorkflowStep) -> bool {
     let conclusion = step.conclusion.as_deref().unwrap_or("");
     let status = step.status.as_deref().unwrap_or("");
-    let visible = matches!(conclusion, "failure" | "cancelled" | "timed_out" | "action_required")
-        || matches!(status, "in_progress" | "queued" | "waiting");
+    let visible = matches!(
+        conclusion,
+        "failure" | "cancelled" | "timed_out" | "action_required"
+    ) || matches!(status, "in_progress" | "queued" | "waiting");
     !visible
 }
 
@@ -167,8 +175,18 @@ enum RunAction {
 
 /// Run statuses Gitea's `status` query parameter accepts.
 const RUN_STATUSES: &[&str] = &[
-    "queued", "in_progress", "completed", "pending", "waiting", "requested",
-    "action_required", "success", "failure", "skipped", "neutral", "cancelled",
+    "queued",
+    "in_progress",
+    "completed",
+    "pending",
+    "waiting",
+    "requested",
+    "action_required",
+    "success",
+    "failure",
+    "skipped",
+    "neutral",
+    "cancelled",
     "timed_out",
 ];
 
@@ -432,7 +450,11 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
         &repo_info.name,
         &args.filter,
         args.limit,
-        |run| args.workflow.as_deref().is_none_or(|w| run_matches_workflow(run, w)),
+        |run| {
+            args.workflow
+                .as_deref()
+                .is_none_or(|w| run_matches_workflow(run, w))
+        },
     )
     .await?;
 
@@ -447,7 +469,10 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
 
     let is_tty = atty_check();
     if is_tty {
-        println!("{:<8} {:<30} {:<12} {:<10} STARTED", "ID", "TITLE", "STATUS", "BRANCH");
+        println!(
+            "{:<8} {:<30} {:<12} {:<10} STARTED",
+            "ID", "TITLE", "STATUS", "BRANCH"
+        );
     }
 
     for run in &runs {
@@ -460,12 +485,12 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
         };
         let status = run.status.as_deref().unwrap_or("");
         let branch = run.head_branch.as_deref().unwrap_or("");
-        let started = run
-            .started_at
-            .map(relative_time)
-            .unwrap_or_default();
+        let started = run.started_at.map(relative_time).unwrap_or_default();
 
-        println!("{:<8} {:<30} {:<12} {:<10} {}", id, truncated, status, branch, started);
+        println!(
+            "{:<8} {:<30} {:<12} {:<10} {}",
+            id, truncated, status, branch, started
+        );
     }
 
     Ok(())
@@ -512,7 +537,14 @@ async fn view_run(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let event = run.event.as_deref().unwrap_or("");
 
     println!("{title} (#{id})");
-    println!("Status: {status}{}", if conclusion.is_empty() { String::new() } else { format!(" ({conclusion})") });
+    println!(
+        "Status: {status}{}",
+        if conclusion.is_empty() {
+            String::new()
+        } else {
+            format!(" ({conclusion})")
+        }
+    );
     println!("Branch: {branch}");
     println!("Event: {event}");
 
@@ -642,8 +674,7 @@ async fn wait_for_commit_runs(
         commit: Some(sha.to_string()),
         ..Default::default()
     };
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(args.wait_for_run);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.wait_for_run);
     loop {
         let runs = fetch_runs(api, owner, repo, &filter, 100, |_| true).await?;
         if !runs.is_empty() {
@@ -709,7 +740,9 @@ fn artifact_dir(out_dir: &std::path::Path, name: &str) -> Result<std::path::Path
     let mut parts = std::path::Path::new(name).components();
     match (parts.next(), parts.next()) {
         (Some(std::path::Component::Normal(_)), None) => Ok(out_dir.join(name)),
-        _ => Err(eyre::eyre!("Refusing to download artifact with unsafe name {name:?}")),
+        _ => Err(eyre::eyre!(
+            "Refusing to download artifact with unsafe name {name:?}"
+        )),
     }
 }
 
@@ -721,7 +754,10 @@ async fn download_artifacts(repo_args: &repo::RepoArgs, args: &DownloadArgs) -> 
 
     // List artifacts for this run
     let resp = api
-        .raw_get(&format!("repos/{owner}/{repo}/actions/runs/{}/artifacts", args.id))
+        .raw_get(&format!(
+            "repos/{owner}/{repo}/actions/runs/{}/artifacts",
+            args.id
+        ))
         .await
         .map_err(|e| eyre::eyre!("{e}"))?;
     let data: serde_json::Value = serde_json::from_str(&resp)?;
@@ -834,7 +870,11 @@ mod tests {
         }
     }
 
-    fn make_step(name: &str, status: &str, conclusion: Option<&str>) -> gitea_api::types::ActionWorkflowStep {
+    fn make_step(
+        name: &str,
+        status: &str,
+        conclusion: Option<&str>,
+    ) -> gitea_api::types::ActionWorkflowStep {
         gitea_api::types::ActionWorkflowStep {
             name: Some(name.to_string()),
             status: Some(status.to_string()),
@@ -884,7 +924,10 @@ mod tests {
 
         let out = render_run_state(&run, &jobs, false);
 
-        assert!(out.contains("Run #42 — feat: hello"), "header missing: {out}");
+        assert!(
+            out.contains("Run #42 — feat: hello"),
+            "header missing: {out}"
+        );
         assert!(out.contains("Status: in_progress"), "status missing: {out}");
         assert!(out.contains("✓ build"));
         assert!(out.contains("✓ checkout"));
@@ -896,17 +939,15 @@ mod tests {
     #[test]
     fn render_default_shows_queued_job() {
         let run = make_run(42, "queue check", "in_progress");
-        let jobs = vec![make_job(
-            "release",
-            "queued",
-            None,
-            vec![],
-        )];
+        let jobs = vec![make_job("release", "queued", None, vec![])];
 
         let out = render_run_state(&run, &jobs, false);
 
         assert!(out.contains("○ release"), "queued job missing icon: {out}");
-        assert!(out.contains("(queued)"), "queued status label missing: {out}");
+        assert!(
+            out.contains("(queued)"),
+            "queued status label missing: {out}"
+        );
     }
 
     #[test]
@@ -933,12 +974,18 @@ mod tests {
         let out = render_run_state(&run, &jobs, true);
 
         // The all-green build job is hidden entirely.
-        assert!(!out.contains("build"), "compact should hide successful job: {out}");
+        assert!(
+            !out.contains("build"),
+            "compact should hide successful job: {out}"
+        );
         // The failing lint job is shown.
         assert!(out.contains("✗ lint"), "lint job should appear: {out}");
         // Within the failing job, only the failed step shows.
         assert!(out.contains("✗ clippy"), "failed step should appear: {out}");
-        assert!(!out.contains("✓ checkout"), "passing step should be hidden: {out}");
+        assert!(
+            !out.contains("✓ checkout"),
+            "passing step should be hidden: {out}"
+        );
     }
 
     #[test]
@@ -954,8 +1001,14 @@ mod tests {
         let out = render_run_state(&run, &jobs, true);
 
         assert!(out.contains("Run #42"));
-        assert!(out.contains("(all steps passing so far)"), "fallback line missing: {out}");
-        assert!(!out.contains("build"), "no jobs should appear in compact all-green: {out}");
+        assert!(
+            out.contains("(all steps passing so far)"),
+            "fallback line missing: {out}"
+        );
+        assert!(
+            !out.contains("build"),
+            "no jobs should appear in compact all-green: {out}"
+        );
     }
 
     #[test]
@@ -974,8 +1027,14 @@ mod tests {
         let out = render_run_state(&run, &jobs, true);
 
         assert!(out.contains("● build"), "in_progress job missing: {out}");
-        assert!(out.contains("● cargo test"), "in_progress step missing: {out}");
-        assert!(!out.contains("✓ checkout"), "successful step should be hidden in compact: {out}");
+        assert!(
+            out.contains("● cargo test"),
+            "in_progress step missing: {out}"
+        );
+        assert!(
+            !out.contains("✓ checkout"),
+            "successful step should be hidden in compact: {out}"
+        );
     }
 
     #[test]
@@ -993,7 +1052,11 @@ mod tests {
         let in_progress_ids: Vec<_> = in_progress.iter().map(|r| r.id.unwrap()).collect();
         let recent_ids: Vec<_> = recent.iter().map(|r| r.id.unwrap()).collect();
 
-        assert_eq!(in_progress_ids, vec![2, 3, 5], "in-progress includes waiting/queued/in_progress");
+        assert_eq!(
+            in_progress_ids,
+            vec![2, 3, 5],
+            "in-progress includes waiting/queued/in_progress"
+        );
         assert_eq!(recent_ids, vec![1, 4], "recent is everything else");
     }
 

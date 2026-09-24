@@ -4,9 +4,9 @@ use gitea_api::types::ActionRunner;
 use url::Url;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
 use crate::issues::atty_check;
 use crate::json::JsonArgs;
+use crate::json::{Field, field, gh};
 use crate::repo;
 
 #[derive(Args, Default)]
@@ -27,11 +27,7 @@ enum Scope {
     Repo { owner: String, name: String },
 }
 
-fn resolve_scope(
-    scope: &ScopeArgs,
-    repo_args: &repo::RepoArgs,
-    config_url: &Url,
-) -> Result<Scope> {
+fn resolve_scope(scope: &ScopeArgs, repo_args: &repo::RepoArgs, config_url: &Url) -> Result<Scope> {
     if scope.admin {
         return Ok(Scope::Admin);
     }
@@ -128,7 +124,10 @@ const RUNNER_FIELDS: &[Field<ActionRunner>] = &[
     field("id", |r| gh::v(r.id)),
     field("labels", |r| {
         serde_json::Value::Array(
-            r.labels.iter().map(|l| serde_json::json!({"id": l.id, "name": l.name, "type": l.type_})).collect(),
+            r.labels
+                .iter()
+                .map(|l| serde_json::json!({"id": l.id, "name": l.name, "type": l.type_}))
+                .collect(),
         )
     }),
     field("name", |r| gh::v(&r.name)),
@@ -142,30 +141,33 @@ async fn list_runners(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()>
     let scope = resolve_scope(&args.scope, repo_args, &config.url)?;
 
     let runners: Vec<ActionRunner> = match &scope {
-        Scope::Admin => api
-            .get_admin_runners()
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-            .into_inner()
-            .runners,
-        Scope::Org(o) => api
-            .get_org_runners()
-            .org(o.clone())
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-            .into_inner()
-            .runners,
-        Scope::Repo { owner, name } => api
-            .get_repo_runners()
-            .owner(owner.clone())
-            .repo(name.clone())
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-            .into_inner()
-            .runners,
+        Scope::Admin => {
+            api.get_admin_runners()
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner()
+                .runners
+        }
+        Scope::Org(o) => {
+            api.get_org_runners()
+                .org(o.clone())
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner()
+                .runners
+        }
+        Scope::Repo { owner, name } => {
+            api.get_repo_runners()
+                .owner(owner.clone())
+                .repo(name.clone())
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner()
+                .runners
+        }
     };
 
     if let Some(json) = json {

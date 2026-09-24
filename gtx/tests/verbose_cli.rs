@@ -11,9 +11,10 @@ const REDACTED: &str = "██████████████████�
 fn verbose_redacts_short_token_and_cookies() {
     let server = FakeGitea::start_raw(|_, _| {
         let mut reply = Reply::json(200, r#"{"login":"me"}"#);
-        reply
-            .headers
-            .push(("Set-Cookie".into(), "i_like_gitea=cookiesecret; Path=/".into()));
+        reply.headers.push((
+            "Set-Cookie".into(),
+            "i_like_gitea=cookiesecret; Path=/".into(),
+        ));
         reply
     });
     let out = server
@@ -46,5 +47,7 @@ fn verbose_show_secrets_prints_token() {
         .args(["-v", "--show-secrets", "api", "/user"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("> authorization: token 123456789\n"));
+        .stderr(predicates::str::contains(
+            "> authorization: token 123456789\n",
+        ));
 }

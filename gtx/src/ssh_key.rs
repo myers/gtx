@@ -2,9 +2,9 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
+use crate::issues::{atty_check, relative_time};
 use crate::json::{Field, field, gh};
 use gitea_api::types::PublicKey;
-use crate::issues::{atty_check, relative_time};
 
 #[derive(Args)]
 pub struct SshKeyCommand {
@@ -132,7 +132,10 @@ async fn add_key(args: &AddArgs) -> Result<()> {
 
     let id = key.id.unwrap_or(0);
     let fingerprint = key.fingerprint.as_deref().unwrap_or("");
-    eprintln!("Added SSH key '{}' (ID: {id}, fingerprint: {fingerprint})", args.title);
+    eprintln!(
+        "Added SSH key '{}' (ID: {id}, fingerprint: {fingerprint})",
+        args.title
+    );
     Ok(())
 }
 

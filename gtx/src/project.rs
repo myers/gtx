@@ -2,10 +2,10 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
-use gitea_api::types::{Project, ProjectColumn};
 use crate::issues::atty_check;
+use crate::json::{Field, field, gh};
 use crate::repo;
+use gitea_api::types::{Project, ProjectColumn};
 
 #[derive(Args)]
 pub struct ProjectCommand {
@@ -110,11 +110,19 @@ const PROJECT_FIELDS: &[Field<Project>] = &[
     field("closedAt", |p| gh::time(p.closed_at)),
     field("closedIssues", |p| gh::v(p.closed_issues.unwrap_or(0))),
     field("createdAt", |p| gh::time(p.created_at)),
-    field("description", |p| gh::v(p.description.as_deref().unwrap_or(""))),
+    field("description", |p| {
+        gh::v(p.description.as_deref().unwrap_or(""))
+    }),
     field("id", |p| gh::v(p.id)),
     field("openIssues", |p| gh::v(p.open_issues.unwrap_or(0))),
     field("state", |p| {
-        gh::v(if matches!(p.state, Some(gitea_api::types::StateType::Closed)) { "CLOSED" } else { "OPEN" })
+        gh::v(
+            if matches!(p.state, Some(gitea_api::types::StateType::Closed)) {
+                "CLOSED"
+            } else {
+                "OPEN"
+            },
+        )
     }),
     field("title", |p| gh::v(&p.title)),
     field("updatedAt", |p| gh::time(p.updated_at)),
@@ -154,7 +162,12 @@ async fn list_projects(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()
     for p in &projects {
         let id = p.id.unwrap_or(0);
         let title = p.title.as_deref().unwrap_or("");
-        let state = p.state.as_ref().map(|s| format!("{s:?}")).unwrap_or_default().to_lowercase();
+        let state = p
+            .state
+            .as_ref()
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_default()
+            .to_lowercase();
         println!("{:<6} {:<40} {}", id, title, state);
     }
 
@@ -183,7 +196,12 @@ async fn view_project(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()>
 
     let title = project.title.as_deref().unwrap_or("(no title)");
     let id = project.id.unwrap_or(0);
-    let state = project.state.as_ref().map(|s| format!("{s:?}")).unwrap_or_default().to_lowercase();
+    let state = project
+        .state
+        .as_ref()
+        .map(|s| format!("{s:?}"))
+        .unwrap_or_default()
+        .to_lowercase();
 
     println!("{title} (#{id})");
     println!("{state}");
@@ -226,7 +244,11 @@ async fn create_project(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result
     Ok(())
 }
 
-async fn set_project_state(repo_args: &repo::RepoArgs, args: &StateArgs, close: bool) -> Result<()> {
+async fn set_project_state(
+    repo_args: &repo::RepoArgs,
+    args: &StateArgs,
+    close: bool,
+) -> Result<()> {
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;

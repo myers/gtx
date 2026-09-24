@@ -2,11 +2,11 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
-use gitea_api::types::{PrBranchInfo, PullRequest, PullReview, StateType};
 use crate::issues::{atty_check, relative_time};
+use crate::json::{Field, field, gh};
 use crate::paginate;
 use crate::repo;
+use gitea_api::types::{PrBranchInfo, PullRequest, PullReview, StateType};
 
 #[derive(Args)]
 pub struct PrCommand {
@@ -208,8 +208,12 @@ impl PrCommand {
             PrAction::Create(args) => create_pr(&self.repo, args).await,
             PrAction::Checkout(args) => checkout_pr(&self.repo, args).await,
             PrAction::Merge(args) => merge_pr(&self.repo, args).await,
-            PrAction::Close(args) => set_pr_state(self.repo.repo.as_deref(), args.number, "closed").await,
-            PrAction::Reopen(args) => set_pr_state(self.repo.repo.as_deref(), args.number, "open").await,
+            PrAction::Close(args) => {
+                set_pr_state(self.repo.repo.as_deref(), args.number, "closed").await
+            }
+            PrAction::Reopen(args) => {
+                set_pr_state(self.repo.repo.as_deref(), args.number, "open").await
+            }
             PrAction::Comment(args) => comment_pr(&self.repo, args).await,
             PrAction::Diff(args) => diff_pr(&self.repo, args).await,
             PrAction::Review(args) => review_pr(&self.repo, args).await,
@@ -326,7 +330,9 @@ impl std::ops::Deref for PrView {
 
 const PR_VIEW_FIELDS: &[Field<PrView>] = pr_fields![
     field("comments", |v| gh::comments(&v.comments)),
-    field("commits", |v| serde_json::Value::Array(v.commits.iter().map(gh_commit).collect())),
+    field("commits", |v| serde_json::Value::Array(
+        v.commits.iter().map(gh_commit).collect()
+    )),
     field("files", |v| {
         serde_json::Value::Array(
             v.files
@@ -336,7 +342,12 @@ const PR_VIEW_FIELDS: &[Field<PrView>] = pr_fields![
         )
     }),
     field("latestReviews", |v| {
-        serde_json::Value::Array(latest_reviews(&v.reviews).into_iter().map(gh_review).collect())
+        serde_json::Value::Array(
+            latest_reviews(&v.reviews)
+                .into_iter()
+                .map(gh_review)
+                .collect(),
+        )
     }),
     field("reviews", |v| {
         serde_json::Value::Array(submitted_reviews(&v.reviews).map(gh_review).collect())
@@ -424,12 +435,18 @@ const CHECK_FIELDS: &[Field<gitea_api::types::CommitStatus>] = &[
         })
     }),
     field("completedAt", |s| gh::time(s.updated_at)),
-    field("description", |s| gh::v(s.description.as_deref().unwrap_or(""))),
+    field("description", |s| {
+        gh::v(s.description.as_deref().unwrap_or(""))
+    }),
     field("link", |s| gh::v(s.target_url.as_deref().unwrap_or(""))),
     field("name", |s| gh::v(s.context.as_deref().unwrap_or(""))),
     field("startedAt", |s| gh::time(s.created_at)),
     field("state", |s| {
-        gh::v(s.status.as_ref().map(|st| gh::v(st).as_str().unwrap_or("").to_uppercase()))
+        gh::v(
+            s.status
+                .as_ref()
+                .map(|st| gh::v(st).as_str().unwrap_or("").to_uppercase()),
+        )
     }),
 ];
 
@@ -463,7 +480,11 @@ async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
                 "closed" => req = req.state(gitea_api::types::RepoListPullRequestsState::Closed),
                 _ => req = req.state(gitea_api::types::RepoListPullRequestsState::All),
             }
-            Ok(req.send().await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?.into_inner())
+            Ok(req
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                .into_inner())
         }
     })
     .await?;
@@ -479,10 +500,7 @@ async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
 
     let is_tty = atty_check();
     if is_tty {
-        println!(
-            "{:<6} {:<50} {:<15} {}",
-            "#", "TITLE", "AUTHOR", "UPDATED"
-        );
+        println!("{:<6} {:<50} {:<15} {}", "#", "TITLE", "AUTHOR", "UPDATED");
     }
 
     for pr in &prs {
@@ -539,7 +557,10 @@ async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
 
     if let Some(json) = json {
         let n = args.number;
-        let mut view = PrView { pr, ..Default::default() };
+        let mut view = PrView {
+            pr,
+            ..Default::default()
+        };
         let api_err = |e| eyre::eyre!("{}", gitea_api::GiteaError::from(e));
         if json.wants("comments") {
             view.comments = api
@@ -715,10 +736,7 @@ async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
                     .as_ref()
                     .and_then(|u| u.login.as_deref())
                     .unwrap_or("unknown");
-                let when = c
-                    .created_at
-                    .map(|dt| relative_time(dt))
-                    .unwrap_or_default();
+                let when = c.created_at.map(|dt| relative_time(dt)).unwrap_or_default();
                 let body = c.body.as_deref().unwrap_or("");
                 println!("\n{author} ({when}):");
                 println!("{body}");
@@ -802,9 +820,10 @@ async fn create_pr(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()> 
     if let Some(ref base_dir) = body_file_dir {
         let refs = crate::body::find_local_refs(&body, base_dir);
         if !refs.is_empty() {
-            let new_body =
-                crate::body::upload_and_rewrite(&api, &config, owner, repo, number, &body, base_dir)
-                    .await?;
+            let new_body = crate::body::upload_and_rewrite(
+                &api, &config, owner, repo, number, &body, base_dir,
+            )
+            .await?;
             api.repo_edit_pull_request()
                 .owner(owner)
                 .repo(repo)
@@ -826,7 +845,9 @@ fn interactive_create_pr(head: &str, base: &str) -> Result<(String, String)> {
     let title = inquire::Text::new("Title:")
         .with_validator(|s: &str| {
             if s.trim().is_empty() {
-                Ok(inquire::validator::Validation::Invalid("Title is required".into()))
+                Ok(inquire::validator::Validation::Invalid(
+                    "Title is required".into(),
+                ))
             } else {
                 Ok(inquire::validator::Validation::Valid)
             }
@@ -867,7 +888,11 @@ async fn checkout_pr(repo_args: &repo::RepoArgs, args: &CheckoutArgs) -> Result<
         .ok_or_else(|| eyre::eyre!("PR has no head branch"))?;
 
     let status = std::process::Command::new("git")
-        .args(["fetch", "origin", &format!("pull/{}/head:{branch}", args.number)])
+        .args([
+            "fetch",
+            "origin",
+            &format!("pull/{}/head:{branch}", args.number),
+        ])
         .status()
         .map_err(|e| eyre::eyre!("git fetch failed: {e}"))?;
 
@@ -973,7 +998,9 @@ async fn review_pr(repo_args: &repo::RepoArgs, args: &ReviewArgs) -> Result<()> 
         "approve" => gitea_api::types::ReviewStateType::Approved,
         "request-changes" | "request_changes" => gitea_api::types::ReviewStateType::RequestChanges,
         "comment" => gitea_api::types::ReviewStateType::Comment,
-        other => eyre::bail!("Invalid review action: {other}. Use approve, request-changes, or comment"),
+        other => {
+            eyre::bail!("Invalid review action: {other}. Use approve, request-changes, or comment")
+        }
     };
 
     let action_str = args.action.clone();
@@ -1029,7 +1056,12 @@ async fn checks_pr(repo_args: &repo::RepoArgs, args: &ChecksArgs) -> Result<()> 
         return json.write_list(&combined.statuses);
     }
 
-    let state = combined.state.as_ref().map(|s| format!("{s:?}")).unwrap_or_else(|| "unknown".to_string()).to_lowercase();
+    let state = combined
+        .state
+        .as_ref()
+        .map(|s| format!("{s:?}"))
+        .unwrap_or_else(|| "unknown".to_string())
+        .to_lowercase();
     println!("Overall: {state}");
 
     if combined.statuses.is_empty() {
@@ -1037,7 +1069,12 @@ async fn checks_pr(repo_args: &repo::RepoArgs, args: &ChecksArgs) -> Result<()> 
     }
     for s in &combined.statuses {
         let context = s.context.as_deref().unwrap_or("");
-        let s_status = s.status.as_ref().map(|st| format!("{st:?}")).unwrap_or_default().to_lowercase();
+        let s_status = s
+            .status
+            .as_ref()
+            .map(|st| format!("{st:?}"))
+            .unwrap_or_default()
+            .to_lowercase();
         let desc = s.description.as_deref().unwrap_or("");
         println!("  {s_status:<10} {context} — {desc}");
     }
@@ -1057,7 +1094,10 @@ async fn diff_pr(repo_args: &repo::RepoArgs, args: &DiffArgs) -> Result<()> {
         "repos/{}/{}/pulls/{}.diff",
         repo_info.owner, repo_info.name, args.number,
     );
-    let text = api.raw_get(&path).await.map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+    let text = api
+        .raw_get(&path)
+        .await
+        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
     print!("{text}");
     Ok(())
 }
@@ -1084,7 +1124,10 @@ async fn edit_pr(repo_args: &repo::RepoArgs, args: &EditArgs) -> Result<()> {
 
         let mut ids = Vec::new();
         for name in &args.label {
-            match labels.iter().find(|l| l.name.as_deref() == Some(name.as_str())) {
+            match labels
+                .iter()
+                .find(|l| l.name.as_deref() == Some(name.as_str()))
+            {
                 Some(l) => ids.push(l.id.unwrap_or(0)),
                 None => eyre::bail!("Label not found: {name}"),
             }
@@ -1102,7 +1145,10 @@ async fn edit_pr(repo_args: &repo::RepoArgs, args: &EditArgs) -> Result<()> {
             .await
             .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
             .into_inner();
-        match milestones.iter().find(|m| m.title.as_deref() == Some(ms_name.as_str())) {
+        match milestones
+            .iter()
+            .find(|m| m.title.as_deref() == Some(ms_name.as_str()))
+        {
             Some(m) => Some(m.id.unwrap_or(0)),
             None => eyre::bail!("Milestone not found: {ms_name}"),
         }

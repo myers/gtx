@@ -249,7 +249,11 @@ fn test_migrates_old_config_dir() {
     let home = tempfile::tempdir().unwrap();
     let old = home.path().join(".config/gt");
     std::fs::create_dir_all(&old).unwrap();
-    std::fs::write(old.join("config.toml"), "[default]\nurl = \"https://old.example\"\n").unwrap();
+    std::fs::write(
+        old.join("config.toml"),
+        "[default]\nurl = \"https://old.example\"\n",
+    )
+    .unwrap();
 
     Command::cargo_bin("gtx")
         .unwrap()

@@ -184,9 +184,7 @@ async fn status(args: &AuthStatusArgs) -> Result<()> {
             let status = e.status().map(|s| s.as_u16());
             match status {
                 Some(401) => {
-                    eprintln!(
-                        "Token rejected by server. Run `gtx auth login` to refresh."
-                    );
+                    eprintln!("Token rejected by server. Run `gtx auth login` to refresh.");
                     eyre::bail!("token invalid (401)");
                 }
                 Some(code) => {
@@ -240,9 +238,15 @@ fn logout() -> Result<()> {
             }))
     })?;
     if removed {
-        eprintln!("Logged out (removed default credentials from {})", path.display());
+        eprintln!(
+            "Logged out (removed default credentials from {})",
+            path.display()
+        );
     } else {
-        eprintln!("Already logged out (no default credentials in {})", path.display());
+        eprintln!(
+            "Already logged out (no default credentials in {})",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -254,9 +258,12 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
 
     let hosts = if let Some(ref hostname) = args.hostname {
         let scheme = if hostname.starts_with("http://") || hostname.starts_with("https://") {
-            let parsed = url::Url::parse(hostname)
-                .map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
-            format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(hostname))
+            let parsed = url::Url::parse(hostname).map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
+            format!(
+                "{}://{}",
+                parsed.scheme(),
+                parsed.host_str().unwrap_or(hostname)
+            )
         } else {
             format!("https://{hostname}")
         };
@@ -275,7 +282,10 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
         let host = format!(
             "{}://{}",
             config.url.scheme(),
-            config.url.host_str().ok_or_else(|| eyre::eyre!("No host in configured URL"))?,
+            config
+                .url
+                .host_str()
+                .ok_or_else(|| eyre::eyre!("No host in configured URL"))?,
         );
         vec![host]
     };
@@ -394,4 +404,3 @@ mod tests {
         assert_eq!(mask_token(""), "(not set)");
     }
 }
-

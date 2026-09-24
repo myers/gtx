@@ -105,7 +105,10 @@ fn main() {
     // show the server's reason rather than just "HTTP 422: Unprocessable
     // Entity" (#7).
     const EMPTY_ERROR: &str = "Err(Error::ErrorResponse(ResponseValue::empty(response)))";
-    assert!(content.contains(EMPTY_ERROR), "progenitor's error arm changed shape");
+    assert!(
+        content.contains(EMPTY_ERROR),
+        "progenitor's error arm changed shape"
+    );
     content = content.replace(EMPTY_ERROR, "Err(Error::UnexpectedResponse(response))");
 
     let out_file = Path::new(&env::var("OUT_DIR").unwrap()).join("codegen.rs");

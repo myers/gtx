@@ -85,8 +85,12 @@ impl SearchCommand {
 /// gh's `search repos --json` fields (REST names and shapes).
 const REPO_FIELDS: &[Field<Repository>] = &[
     field("createdAt", |r| gh::time(r.created_at)),
-    field("defaultBranch", |r| gh::v(r.default_branch.as_deref().unwrap_or(""))),
-    field("description", |r| gh::v(r.description.as_deref().unwrap_or(""))),
+    field("defaultBranch", |r| {
+        gh::v(r.default_branch.as_deref().unwrap_or(""))
+    }),
+    field("description", |r| {
+        gh::v(r.description.as_deref().unwrap_or(""))
+    }),
     field("forksCount", |r| gh::v(r.forks_count.unwrap_or(0))),
     field("fullName", |r| gh::v(&r.full_name)),
     field("hasIssues", |r| gh::v(r.has_issues.unwrap_or(false))),
@@ -99,7 +103,9 @@ const REPO_FIELDS: &[Field<Repository>] = &[
     field("isPrivate", |r| gh::v(r.private.unwrap_or(false))),
     field("language", |r| gh::v(r.language.as_deref().unwrap_or(""))),
     field("name", |r| gh::v(&r.name)),
-    field("openIssuesCount", |r| gh::v(r.open_issues_count.unwrap_or(0))),
+    field("openIssuesCount", |r| {
+        gh::v(r.open_issues_count.unwrap_or(0))
+    }),
     field("owner", |r| gh::rest_user(r.owner.as_ref())),
     field("size", |r| gh::v(r.size.unwrap_or(0))),
     field("stargazersCount", |r| gh::v(r.stars_count.unwrap_or(0))),
@@ -144,10 +150,7 @@ async fn search_repos(args: &RepoSearchArgs) -> Result<()> {
 
     let is_tty = atty_check();
     if is_tty {
-        println!(
-            "{:<35} {:<45} {:>5} {:>5}",
-            "NAME", "DESCRIPTION", "★", "⑂"
-        );
+        println!("{:<35} {:<45} {:>5} {:>5}", "NAME", "DESCRIPTION", "★", "⑂");
     }
 
     for repo in repos {
@@ -200,16 +203,32 @@ const ISSUE_FIELDS: &[Field<Issue>] = &[
     field("commentsCount", |i| gh::v(i.comments.unwrap_or(0))),
     field("createdAt", |i| gh::time(i.created_at)),
     field("id", |i| gh::v(i.id)),
-    field("isDraft", |i| gh::v(i.pull_request.as_ref().and_then(|p| p.draft).unwrap_or(false))),
+    field("isDraft", |i| {
+        gh::v(
+            i.pull_request
+                .as_ref()
+                .and_then(|p| p.draft)
+                .unwrap_or(false),
+        )
+    }),
     field("isLocked", |i| gh::v(i.is_locked.unwrap_or(false))),
     field("isPullRequest", |i| gh::v(i.pull_request.is_some())),
     field("labels", |i| gh::labels(&i.labels)),
     field("number", |i| gh::v(i.number)),
     field("repository", |i| {
         let r = i.repository.as_ref();
-        gh::repo_ref(r.and_then(|r| r.name.as_deref()), r.and_then(|r| r.full_name.as_deref()))
+        gh::repo_ref(
+            r.and_then(|r| r.name.as_deref()),
+            r.and_then(|r| r.full_name.as_deref()),
+        )
     }),
-    field("state", |i| gh::v(if matches!(i.state, Some(StateType::Closed)) { "closed" } else { "open" })),
+    field("state", |i| {
+        gh::v(if matches!(i.state, Some(StateType::Closed)) {
+            "closed"
+        } else {
+            "open"
+        })
+    }),
     field("title", |i| gh::v(&i.title)),
     field("updatedAt", |i| gh::time(i.updated_at)),
     field("url", |i| gh::v(&i.html_url)),
@@ -220,7 +239,11 @@ async fn search_issues(args: &IssueSearchArgs, kind: IssueSearchIssuesType) -> R
     let config = Config::load()?;
     let api = config.client()?;
 
-    let mut req = api.issue_search_issues().q(&args.query).limit(args.limit).type_(kind);
+    let mut req = api
+        .issue_search_issues()
+        .q(&args.query)
+        .limit(args.limit)
+        .type_(kind);
 
     if let Some(ref state) = args.state {
         match state.as_str() {
@@ -301,7 +324,9 @@ async fn search_issues(args: &IssueSearchArgs, kind: IssueSearchIssuesType) -> R
 const USER_FIELDS: &[Field<User>] = &[
     field("avatarUrl", |u| gh::v(&u.avatar_url)),
     field("createdAt", |u| gh::time(u.created)),
-    field("description", |u| gh::v(u.description.as_deref().unwrap_or(""))),
+    field("description", |u| {
+        gh::v(u.description.as_deref().unwrap_or(""))
+    }),
     field("email", |u| gh::v(u.email.as_deref().unwrap_or(""))),
     field("id", |u| gh::v(u.id)),
     field("location", |u| gh::v(u.location.as_deref().unwrap_or(""))),

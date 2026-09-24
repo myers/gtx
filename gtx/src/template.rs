@@ -73,11 +73,20 @@ fn err(msg: impl Into<String>) -> TemplateError {
     TemplateError::Exec(msg.into())
 }
 
-fn arg<'a>(name: &str, args: &'a [Value], i: usize) -> std::result::Result<&'a Value, TemplateError> {
-    args.get(i).ok_or_else(|| err(format!("{name}: missing argument")))
+fn arg<'a>(
+    name: &str,
+    args: &'a [Value],
+    i: usize,
+) -> std::result::Result<&'a Value, TemplateError> {
+    args.get(i)
+        .ok_or_else(|| err(format!("{name}: missing argument")))
 }
 
-fn str_arg<'a>(name: &str, args: &'a [Value], i: usize) -> std::result::Result<&'a str, TemplateError> {
+fn str_arg<'a>(
+    name: &str,
+    args: &'a [Value],
+    i: usize,
+) -> std::result::Result<&'a str, TemplateError> {
     arg(name, args, i)?
         .as_str()
         .ok_or_else(|| err(format!("{name}: expected a string, got {}", args[i])))
@@ -113,29 +122,47 @@ fn to_value(v: &serde_json::Value) -> Value {
         serde_json::Value::String(s) => Value::String(s.as_str().into()),
         serde_json::Value::Array(a) => Value::List(a.iter().map(to_value).collect()),
         serde_json::Value::Object(o) => Value::Map(Arc::new(
-            o.iter().map(|(k, v)| (k.as_str().into(), to_value(v))).collect(),
+            o.iter()
+                .map(|(k, v)| (k.as_str().into(), to_value(v)))
+                .collect(),
         )),
     }
 }
 
 fn parse_time(name: &str, s: &str) -> std::result::Result<DateTime<FixedOffset>, TemplateError> {
-    DateTime::parse_from_rfc3339(s).map_err(|e| err(format!("{name}: cannot parse time {s:?}: {e}")))
+    DateTime::parse_from_rfc3339(s)
+        .map_err(|e| err(format!("{name}: cannot parse time {s:?}: {e}")))
 }
 
 /// Render `src` over `data`. `color` is whether `autocolor` colors; `now` is
 /// what `timeago` measures from.
-pub fn render(src: &str, data: &serde_json::Value, color: bool, now: DateTime<Utc>) -> Result<String> {
+pub fn render(
+    src: &str,
+    data: &serde_json::Value,
+    color: bool,
+    now: DateTime<Utc>,
+) -> Result<String> {
     let state = Arc::new(Mutex::new(State::default()));
     let row_state = state.clone();
     let render_state = state.clone();
     let tmpl = Template::new("")
         .func("tablerow", move |args| {
-            let row = args.iter().map(scalar).collect::<std::result::Result<Vec<_>, _>>()?;
-            row_state.lock().map_err(|_| err("tablerow: poisoned"))?.rows.push(row);
+            let row = args
+                .iter()
+                .map(scalar)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            row_state
+                .lock()
+                .map_err(|_| err("tablerow: poisoned"))?
+                .rows
+                .push(row);
             Ok(Value::String("".into()))
         })
         .func("tablerender", move |_| {
-            render_state.lock().map_err(|_| err("tablerender: poisoned"))?.render_table();
+            render_state
+                .lock()
+                .map_err(|_| err("tablerender: poisoned"))?
+                .render_table();
             Ok(Value::String("".into()))
         })
         .func("timeago", move |args| {
@@ -152,23 +179,37 @@ pub fn render(src: &str, data: &serde_json::Value, color: bool, now: DateTime<Ut
                 .as_int()
                 .ok_or_else(|| err("truncate: expected an integer width"))?;
             let s = scalar(arg("truncate", args, 1)?)?;
-            Ok(Value::String(truncate(usize::try_from(n).unwrap_or(0), &s).into()))
+            Ok(Value::String(
+                truncate(usize::try_from(n).unwrap_or(0), &s).into(),
+            ))
         })
         .func("color", |args| -> FnResult {
             let style = str_arg("color", args, 0)?;
-            Ok(Value::String(ansi_color(&scalar(arg("color", args, 1)?)?, style).into()))
+            Ok(Value::String(
+                ansi_color(&scalar(arg("color", args, 1)?)?, style).into(),
+            ))
         })
         .func("autocolor", move |args| -> FnResult {
             let style = str_arg("autocolor", args, 0)?;
             let text = scalar(arg("autocolor", args, 1)?)?;
-            Ok(Value::String(if color { ansi_color(&text, style) } else { text }.into()))
+            Ok(Value::String(
+                if color {
+                    ansi_color(&text, style)
+                } else {
+                    text
+                }
+                .into(),
+            ))
         })
         .func("join", |args| {
             let sep = str_arg("join", args, 0)?;
             let Value::List(items) = arg("join", args, 1)? else {
                 return Err(err("join: expected a list"));
             };
-            let parts = items.iter().map(scalar).collect::<std::result::Result<Vec<_>, _>>()?;
+            let parts = items
+                .iter()
+                .map(scalar)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(Value::String(parts.join(sep).into()))
         })
         .func("pluck", |args| {
@@ -187,15 +228,23 @@ pub fn render(src: &str, data: &serde_json::Value, color: bool, now: DateTime<Ut
         })
         .func("hyperlink", |args| {
             let link = str_arg("hyperlink", args, 0)?;
-            let text = args.get(1).and_then(Value::as_str).filter(|t| !t.is_empty()).unwrap_or(link);
-            Ok(Value::String(format!("\x1b]8;;{link}\x1b\\{text}\x1b]8;;\x1b\\").into()))
+            let text = args
+                .get(1)
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+                .unwrap_or(link);
+            Ok(Value::String(
+                format!("\x1b]8;;{link}\x1b\\{text}\x1b]8;;\x1b\\").into(),
+            ))
         })
         .parse(src)
         .map_err(|e| eyre::eyre!("{e}"))?;
 
     tmpl.execute_fmt(&mut Sink(state.clone()), &to_value(data))
         .map_err(|e| eyre::eyre!("{e}"))?;
-    let mut st = state.lock().map_err(|_| eyre::eyre!("template state poisoned"))?;
+    let mut st = state
+        .lock()
+        .map_err(|_| eyre::eyre!("template state poisoned"))?;
     st.render_table();
     Ok(std::mem::take(&mut st.out))
 }
@@ -203,9 +252,8 @@ pub fn render(src: &str, data: &serde_json::Value, color: bool, now: DateTime<Ut
 /// gh's `text.RelativeTimeAgo`.
 fn time_ago(now: DateTime<Utc>, t: DateTime<Utc>) -> String {
     let ago = now - t;
-    let about = |n: i64, unit: &str| {
-        format!("about {n} {unit}{} ago", if n == 1 { "" } else { "s" })
-    };
+    let about =
+        |n: i64, unit: &str| format!("about {n} {unit}{} ago", if n == 1 { "" } else { "s" });
     let hours = ago.num_hours();
     if ago.num_minutes() < 1 {
         "less than a minute ago".into()
@@ -270,7 +318,13 @@ fn ansi_color(s: &str, style: &str) -> String {
     let (fg_key, fg_style) = fg.split_once('+').unwrap_or((fg, ""));
     let (bg_key, bg_style) = bg.split_once('+').unwrap_or((bg, ""));
     let mut c = String::from("\x1b[0;");
-    for (flag, seq) in [('b', "1;"), ('B', "5;"), ('u', "4;"), ('i', "7;"), ('s', "9;")] {
+    for (flag, seq) in [
+        ('b', "1;"),
+        ('B', "5;"),
+        ('u', "4;"),
+        ('i', "7;"),
+        ('s', "9;"),
+    ] {
         if fg_style.contains(flag) {
             c.push_str(seq);
         }
@@ -294,10 +348,28 @@ fn ansi_color(s: &str, style: &str) -> String {
 /// Format `t` with a Go time layout (`2006-01-02 15:04:05 -0700 MST`).
 fn go_time_format(layout: &str, t: &DateTime<FixedOffset>) -> String {
     const MONTHS: [&str; 12] = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
-    const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const DAYS: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
     let month = MONTHS[t.month0() as usize];
     let day = DAYS[t.weekday().num_days_from_sunday() as usize];
     let h12 = match t.hour() % 12 {
@@ -333,7 +405,14 @@ fn go_time_format(layout: &str, t: &DateTime<FixedOffset>) -> String {
             ("Jan", month[..3].to_string()),
             ("Monday", day.to_string()),
             ("Mon", day[..3].to_string()),
-            ("MST", if offset == 0 { "UTC".into() } else { zone(false, false, false, false) }),
+            (
+                "MST",
+                if offset == 0 {
+                    "UTC".into()
+                } else {
+                    zone(false, false, false, false)
+                },
+            ),
             ("2006", format!("{:04}", t.year())),
             ("002", format!("{:03}", t.ordinal())),
             ("__2", format!("{:>3}", t.ordinal())),
@@ -369,7 +448,10 @@ fn go_time_format(layout: &str, t: &DateTime<FixedOffset>) -> String {
             continue;
         }
         // Fractional seconds: `.000` / `,000` (fixed) or `.999` (trailing zeros cut).
-        if (b[i] == b'.' || b[i] == b',') && i + 1 < b.len() && (b[i + 1] == b'0' || b[i + 1] == b'9') {
+        if (b[i] == b'.' || b[i] == b',')
+            && i + 1 < b.len()
+            && (b[i + 1] == b'0' || b[i + 1] == b'9')
+        {
             let digit = b[i + 1];
             let mut j = i + 1;
             while j < b.len() && b[j] == digit {
@@ -423,7 +505,10 @@ mod tests {
             "x     1\nlong  \n"
         );
         assert_eq!(
-            r("{{range .}}{{tablerow .a}}{{end}}{{tablerender}}--{{tablerow \"z\"}}", v),
+            r(
+                "{{range .}}{{tablerow .a}}{{end}}{{tablerender}}--{{tablerow \"z\"}}",
+                v
+            ),
             "x\nlong\n--z\n"
         );
     }
@@ -446,8 +531,15 @@ mod tests {
 
     #[test]
     fn timeago_like_gh() {
-        let now = DateTime::parse_from_rfc3339("2026-03-01T12:00:00Z").unwrap().with_timezone(&Utc);
-        let ago = |s: &str| time_ago(now, DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc));
+        let now = DateTime::parse_from_rfc3339("2026-03-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ago = |s: &str| {
+            time_ago(
+                now,
+                DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc),
+            )
+        };
         assert_eq!(ago("2026-03-01T11:59:30Z"), "less than a minute ago");
         assert_eq!(ago("2026-03-01T11:59:00Z"), "about 1 minute ago");
         assert_eq!(ago("2026-03-01T09:00:00Z"), "about 3 hours ago");
@@ -461,20 +553,38 @@ mod tests {
     #[test]
     fn timefmt_go_layouts() {
         let t = DateTime::parse_from_rfc3339("2026-01-05T15:04:05.120+02:00").unwrap();
-        assert_eq!(go_time_format("2006-01-02T15:04:05Z07:00", &t), "2026-01-05T15:04:05+02:00");
+        assert_eq!(
+            go_time_format("2006-01-02T15:04:05Z07:00", &t),
+            "2026-01-05T15:04:05+02:00"
+        );
         assert_eq!(go_time_format("Mon Jan _2 3:04PM", &t), "Mon Jan  5 3:04PM");
-        assert_eq!(go_time_format("January 2, 2006 .000 .999 -0700", &t), "January 5, 2026 .120 .12 +0200");
+        assert_eq!(
+            go_time_format("January 2, 2006 .000 .999 -0700", &t),
+            "January 5, 2026 .120 .12 +0200"
+        );
         let z = DateTime::parse_from_rfc3339("2026-01-05T00:00:00Z").unwrap();
-        assert_eq!(go_time_format("02/01/06 03pm MST Z07:00", &z), "05/01/26 12am UTC Z");
+        assert_eq!(
+            go_time_format("02/01/06 03pm MST Z07:00", &z),
+            "05/01/26 12am UTC Z"
+        );
     }
 
     #[test]
     fn helpers() {
         let v = json!({"ls": [{"name": "a"}, {"name": "b"}, {}]});
         assert_eq!(r(r#"{{join "+" (pluck "name" .ls)}}"#, v), "a+b+");
-        assert_eq!(r(r#"{{color "red" "x"}}"#, json!(null)), "\x1b[0;31mx\x1b[0m");
-        assert_eq!(r(r#"{{color "green+bh:blue" "x"}}"#, json!(null)), "\x1b[0;1;92;44mx\x1b[0m");
-        assert_eq!(r(r#"{{color "208" "x"}}"#, json!(null)), "\x1b[0;38;5;208mx\x1b[0m");
+        assert_eq!(
+            r(r#"{{color "red" "x"}}"#, json!(null)),
+            "\x1b[0;31mx\x1b[0m"
+        );
+        assert_eq!(
+            r(r#"{{color "green+bh:blue" "x"}}"#, json!(null)),
+            "\x1b[0;1;92;44mx\x1b[0m"
+        );
+        assert_eq!(
+            r(r#"{{color "208" "x"}}"#, json!(null)),
+            "\x1b[0;38;5;208mx\x1b[0m"
+        );
         assert_eq!(r(r#"{{autocolor "red" "x"}}"#, json!(null)), "x");
         let colored = render(r#"{{autocolor "red" "x"}}"#, &json!(null), true, Utc::now()).unwrap();
         assert_eq!(colored, "\x1b[0;31mx\x1b[0m");

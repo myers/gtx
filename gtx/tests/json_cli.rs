@@ -34,7 +34,11 @@ fn issue_list_json_uses_gh_field_names() {
     let v = json_out(
         &server,
         &[
-            "issue", "list", "-R", "o/r", "--json",
+            "issue",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
             "number,title,state,closed,author,assignees,labels,milestone,url,createdAt,updatedAt,closedAt,id,isPinned,body",
         ],
     );
@@ -74,7 +78,11 @@ fn pr_list_json_uses_gh_field_names() {
     let v = json_out(
         &server,
         &[
-            "pr", "list", "-R", "o/r", "--json",
+            "pr",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
             "number,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,isCrossRepository,mergeCommit,mergeable,mergedAt,mergedBy,url,additions,deletions,changedFiles,headRepository,headRepositoryOwner",
         ],
     );
@@ -97,9 +105,20 @@ fn pr_list_json_uses_gh_field_names() {
 #[test]
 fn label_list_json_uses_gh_field_names() {
     let server = FakeGitea::start(|_| {
-        r#"[{"id":2,"name":"bug","color":"ee0701","description":"d","url":"https://g/api/l/2"}]"#.into()
+        r#"[{"id":2,"name":"bug","color":"ee0701","description":"d","url":"https://g/api/l/2"}]"#
+            .into()
     });
-    let v = json_out(&server, &["label", "list", "-R", "o/r", "--json", "id,name,color,description,url"]);
+    let v = json_out(
+        &server,
+        &[
+            "label",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
+            "id,name,color,description,url",
+        ],
+    );
     assert_eq!(
         v,
         json!([{"id": 2, "name": "bug", "color": "ee0701", "description": "d", "url": "https://g/api/l/2"}])
@@ -125,21 +144,45 @@ fn actions_lists_json_use_gh_field_names() {
         }
     });
     assert_eq!(
-        json_out(&server, &["secret", "list", "-R", "o/r", "--json", "name,updatedAt"]),
+        json_out(
+            &server,
+            &["secret", "list", "-R", "o/r", "--json", "name,updatedAt"]
+        ),
         json!([{"name": "TOKEN", "updatedAt": "2026-01-01T00:00:00Z"}])
     );
     assert_eq!(
-        json_out(&server, &["variable", "list", "-R", "o/r", "--json", "name,value"]),
+        json_out(
+            &server,
+            &["variable", "list", "-R", "o/r", "--json", "name,value"]
+        ),
         json!([{"name": "V", "value": "x"}])
     );
     assert_eq!(
-        json_out(&server, &["workflow", "list", "-R", "o/r", "--json", "id,name,path,state"]),
+        json_out(
+            &server,
+            &[
+                "workflow",
+                "list",
+                "-R",
+                "o/r",
+                "--json",
+                "id,name,path,state"
+            ]
+        ),
         json!([{"id": "ci.yml", "name": "CI", "path": ".gitea/workflows/ci.yml", "state": "active"}])
     );
     assert_eq!(
         json_out(
             &server,
-            &["repo", "deploy-key", "list", "-R", "o/r", "--json", "id,title,key,readOnly,createdAt"]
+            &[
+                "repo",
+                "deploy-key",
+                "list",
+                "-R",
+                "o/r",
+                "--json",
+                "id,title,key,readOnly,createdAt"
+            ]
         ),
         json!([{"id": 1, "title": "k", "key": "ssh-ed25519 AAA", "readOnly": true, "createdAt": "2026-01-01T00:00:00Z"}])
     );
@@ -178,7 +221,18 @@ fn issue_view_json_uses_gh_field_names() {
         ),
     });
     assert_eq!(
-        json_out(&server, &["issue", "view", "-R", "o/r", "5", "--json", "number,state,author,url,comments"]),
+        json_out(
+            &server,
+            &[
+                "issue",
+                "view",
+                "-R",
+                "o/r",
+                "5",
+                "--json",
+                "number,state,author,url,comments"
+            ]
+        ),
         json!({
             "number": 5, "state": "OPEN", "url": "https://g/o/r/issues/5",
             "author": {"id": 3, "login": "alice", "name": "Alice A"},
@@ -187,14 +241,22 @@ fn issue_view_json_uses_gh_field_names() {
     );
     // Comments are only fetched when asked for.
     let before = server.seen().len();
-    json_out(&server, &["issue", "view", "-R", "o/r", "5", "--json", "title"]);
-    assert_eq!(server.seen()[before..], ["GET /api/v1/repos/o/r/issues/5".to_string()]);
+    json_out(
+        &server,
+        &["issue", "view", "-R", "o/r", "5", "--json", "title"],
+    );
+    assert_eq!(
+        server.seen()[before..],
+        ["GET /api/v1/repos/o/r/issues/5".to_string()]
+    );
     server
         .gtx()
         .args(["issue", "view", "-R", "o/r", "5", "--json"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Specify one or more comma-separated fields"));
+        .stderr(predicate::str::contains(
+            "Specify one or more comma-separated fields",
+        ));
 }
 
 #[test]
@@ -209,7 +271,8 @@ fn pr_view_json_uses_gh_field_names() {
                 "committer":{{"name":"Alice A","email":"a@x","date":"2026-01-02T00:00:00Z"}}}}}}]"#
             ),
             "/api/v1/repos/o/r/pulls/6/files" => {
-                r#"[{"filename":"src/a.rs","additions":3,"deletions":1,"status":"modified"}]"#.into()
+                r#"[{"filename":"src/a.rs","additions":3,"deletions":1,"status":"modified"}]"#
+                    .into()
             }
             "/api/v1/repos/o/r/pulls/6/reviews" => format!(
                 r#"[{{"id":1,"user":{USER},"state":"COMMENT","body":"hm","commit_id":"aaa","submitted_at":"2026-01-02T00:00:00Z"}},
@@ -224,12 +287,18 @@ fn pr_view_json_uses_gh_field_names() {
     });
     let v = json_out(
         &server,
-        &["pr", "view", "-R", "o/r", "6", "--json", "number,headRefName,comments,commits,files,reviews,latestReviews"],
+        &[
+            "pr",
+            "view",
+            "-R",
+            "o/r",
+            "6",
+            "--json",
+            "number,headRefName,comments,commits,files,reviews,latestReviews",
+        ],
     );
     let alice = json!({"login": "alice"});
-    let review = |id: i64, state: &str, body: &str, at: &str| {
-        json!({"id": id, "author": alice, "body": body, "state": state, "submittedAt": at, "commit": {"oid": "aaa"}})
-    };
+    let review = |id: i64, state: &str, body: &str, at: &str| json!({"id": id, "author": alice, "body": body, "state": state, "submittedAt": at, "commit": {"oid": "aaa"}});
     assert_eq!(
         v,
         json!({
@@ -252,7 +321,8 @@ fn pr_view_json_uses_gh_field_names() {
 
 #[test]
 fn pr_checks_json_uses_gh_field_names() {
-    let server = FakeGitea::start(|target| match target {
+    let server = FakeGitea::start(|target| {
+        match target {
         "/api/v1/repos/o/r/pulls/6" => {
             r#"{"number":6,"head":{"sha":"aaa"},"base":{"sha":"bbb"}}"#.into()
         }
@@ -260,9 +330,21 @@ fn pr_checks_json_uses_gh_field_names() {
             "description":"Failing","target_url":"https://g/run/1","created_at":"2026-01-01T00:00:00Z",
             "updated_at":"2026-01-01T00:05:00Z"}]}"#
             .into(),
+    }
     });
     assert_eq!(
-        json_out(&server, &["pr", "checks", "-R", "o/r", "6", "--json", "name,state,bucket,link,description,startedAt,completedAt"]),
+        json_out(
+            &server,
+            &[
+                "pr",
+                "checks",
+                "-R",
+                "o/r",
+                "6",
+                "--json",
+                "name,state,bucket,link,description,startedAt,completedAt"
+            ]
+        ),
         json!([{
             "name": "ci / build (push)", "state": "FAILURE", "bucket": "fail", "link": "https://g/run/1",
             "description": "Failing", "startedAt": "2026-01-01T00:00:00Z", "completedAt": "2026-01-01T00:05:00Z",
@@ -272,7 +354,8 @@ fn pr_checks_json_uses_gh_field_names() {
 
 #[test]
 fn run_view_json_uses_gh_field_names() {
-    let server = FakeGitea::start(|target| match target {
+    let server = FakeGitea::start(|target| {
+        match target {
         p if p.starts_with("/api/v1/repos/o/r/actions/runs/7/jobs") => {
             r#"{"total_count":1,"jobs":[{"id":70,"name":"build","status":"completed","conclusion":"success",
             "html_url":"https://g/o/r/actions/runs/7/jobs/0","started_at":"2026-01-01T00:00:00Z",
@@ -282,9 +365,21 @@ fn run_view_json_uses_gh_field_names() {
                 .into()
         }
         _ => r#"{"id":7,"head_sha":"aaa","status":"completed","conclusion":"success"}"#.into(),
+    }
     });
     assert_eq!(
-        json_out(&server, &["run", "view", "-R", "o/r", "7", "--json", "databaseId,headSha,conclusion,jobs"]),
+        json_out(
+            &server,
+            &[
+                "run",
+                "view",
+                "-R",
+                "o/r",
+                "7",
+                "--json",
+                "databaseId,headSha,conclusion,jobs"
+            ]
+        ),
         json!({
             "databaseId": 7, "headSha": "aaa", "conclusion": "success",
             "jobs": [{
@@ -300,8 +395,14 @@ fn run_view_json_uses_gh_field_names() {
     );
     // Jobs are only fetched when asked for.
     let before = server.seen().len();
-    json_out(&server, &["run", "view", "-R", "o/r", "7", "--json", "databaseId"]);
-    assert_eq!(server.seen()[before..], ["GET /api/v1/repos/o/r/actions/runs/7".to_string()]);
+    json_out(
+        &server,
+        &["run", "view", "-R", "o/r", "7", "--json", "databaseId"],
+    );
+    assert_eq!(
+        server.seen()[before..],
+        ["GET /api/v1/repos/o/r/actions/runs/7".to_string()]
+    );
 }
 
 const REPO: &str = r#"{"id":4,"name":"r","full_name":"o/r","description":"d",
@@ -332,14 +433,22 @@ fn repo_view_and_list_json_use_gh_field_names() {
         "repositoryTopics": [{"name": "cli"}], "watchers": {"totalCount": 3}, "diskUsage": 12,
         "viewerPermission": "ADMIN",
     });
-    assert_eq!(json_out(&server, &["repo", "view", "-R", "o/r", "--json", fields]), want);
-    assert_eq!(json_out(&server, &["repo", "list", "--json", fields]), json!([want]));
+    assert_eq!(
+        json_out(&server, &["repo", "view", "-R", "o/r", "--json", fields]),
+        want
+    );
+    assert_eq!(
+        json_out(&server, &["repo", "list", "--json", fields]),
+        json!([want])
+    );
     server
         .gtx()
         .args(["repo", "list", "--json", "full_name"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Unknown JSON field: \"full_name\""));
+        .stderr(predicate::str::contains(
+            "Unknown JSON field: \"full_name\"",
+        ));
 }
 
 #[test]
@@ -361,7 +470,13 @@ fn search_json_uses_gh_field_names() {
     assert_eq!(
         json_out(
             &server,
-            &["search", "repos", "x", "--json", "fullName,name,owner,isPrivate,stargazersCount,forksCount,defaultBranch,visibility,url,language,hasIssues,homepage,size,watchersCount,openIssuesCount"]
+            &[
+                "search",
+                "repos",
+                "x",
+                "--json",
+                "fullName,name,owner,isPrivate,stargazersCount,forksCount,defaultBranch,visibility,url,language,hasIssues,homepage,size,watchersCount,openIssuesCount"
+            ]
         ),
         json!([{
             "fullName": "o/r", "name": "r", "isPrivate": true, "stargazersCount": 2, "forksCount": 1,
@@ -370,18 +485,29 @@ fn search_json_uses_gh_field_names() {
             "hasIssues": true, "homepage": "https://w", "size": 12, "watchersCount": 3, "openIssuesCount": 5,
         }])
     );
-    let issue_fields = "number,title,state,author,repository,commentsCount,isLocked,isPullRequest,url,createdAt";
+    let issue_fields =
+        "number,title,state,author,repository,commentsCount,isLocked,isPullRequest,url,createdAt";
     let want = json!([{
         "number": 5, "title": "Bug", "state": "open", "commentsCount": 2, "isLocked": false,
         "isPullRequest": false, "url": "https://g/o/r/issues/5", "createdAt": "2026-01-01T00:00:00Z",
         "author": {"id": 3, "is_bot": false, "login": "alice", "type": "User", "url": ""},
         "repository": {"name": "r", "nameWithOwner": "o/r"},
     }]);
-    assert_eq!(json_out(&server, &["search", "issues", "x", "--json", issue_fields]), want);
-    assert_eq!(json_out(&server, &["search", "prs", "x", "--json", issue_fields]), want);
+    assert_eq!(
+        json_out(&server, &["search", "issues", "x", "--json", issue_fields]),
+        want
+    );
+    assert_eq!(
+        json_out(&server, &["search", "prs", "x", "--json", issue_fields]),
+        want
+    );
     let seen = server.seen();
     assert!(seen.iter().any(|s| s.starts_with("GET /api/v1/repos/issues/search?") && s.contains("type=issues")), "{seen:?}");
-    assert!(seen.iter().any(|s| s.starts_with("GET /api/v1/repos/issues/search?") && s.contains("type=pulls")), "{seen:?}");
+    assert!(
+        seen.iter()
+            .any(|s| s.starts_with("GET /api/v1/repos/issues/search?") && s.contains("type=pulls")),
+        "{seen:?}"
+    );
     assert_eq!(
         json_out(&server, &["search", "users", "a", "--json", "login,name"]),
         json!([{"login": "alice", "name": "Alice A"}])
@@ -411,33 +537,100 @@ fn gtx_only_lists_json_use_camel_case() {
         }
     });
     let cases: &[(&[&str], serde_json::Value)] = &[
-        (&["ssh-key", "list", "--json", "id,keyType,readOnly,createdAt"],
-         json!([{"id": 1, "keyType": "user", "readOnly": false, "createdAt": "2026-01-01T00:00:00Z"}])),
-        (&["gpg-key", "list", "--json", "keyId,emails,canSign"],
-         json!([{"keyId": "ABC", "emails": [{"email": "a@x", "verified": true}], "canSign": true}])),
-        (&["org", "list", "--json", "login,name,visibility"],
-         json!([{"login": "chaos", "name": "Chaos Inc", "visibility": "public"}])),
-        (&["org", "view", "chaos", "--json", "login,name"],
-         json!({"login": "chaos", "name": "Chaos Inc"})),
-        (&["milestone", "list", "-R", "o/r", "--json", "number,title,state,openIssues,closedIssues,dueOn"],
-         json!([{"number": 9, "title": "M1", "state": "OPEN", "openIssues": 2, "closedIssues": 1, "dueOn": null}])),
-        (&["milestone", "view", "-R", "o/r", "9", "--json", "number,openIssues"],
-         json!({"number": 9, "openIssues": 2})),
-        (&["notification", "list", "--json", "id,unread,subject,repository,updatedAt"],
-         json!([{"id": 5, "unread": true, "updatedAt": "2026-01-01T00:00:00Z",
+        (
+            &["ssh-key", "list", "--json", "id,keyType,readOnly,createdAt"],
+            json!([{"id": 1, "keyType": "user", "readOnly": false, "createdAt": "2026-01-01T00:00:00Z"}]),
+        ),
+        (
+            &["gpg-key", "list", "--json", "keyId,emails,canSign"],
+            json!([{"keyId": "ABC", "emails": [{"email": "a@x", "verified": true}], "canSign": true}]),
+        ),
+        (
+            &["org", "list", "--json", "login,name,visibility"],
+            json!([{"login": "chaos", "name": "Chaos Inc", "visibility": "public"}]),
+        ),
+        (
+            &["org", "view", "chaos", "--json", "login,name"],
+            json!({"login": "chaos", "name": "Chaos Inc"}),
+        ),
+        (
+            &[
+                "milestone",
+                "list",
+                "-R",
+                "o/r",
+                "--json",
+                "number,title,state,openIssues,closedIssues,dueOn",
+            ],
+            json!([{"number": 9, "title": "M1", "state": "OPEN", "openIssues": 2, "closedIssues": 1, "dueOn": null}]),
+        ),
+        (
+            &[
+                "milestone",
+                "view",
+                "-R",
+                "o/r",
+                "9",
+                "--json",
+                "number,openIssues",
+            ],
+            json!({"number": 9, "openIssues": 2}),
+        ),
+        (
+            &[
+                "notification",
+                "list",
+                "--json",
+                "id,unread,subject,repository,updatedAt",
+            ],
+            json!([{"id": 5, "unread": true, "updatedAt": "2026-01-01T00:00:00Z",
                  "subject": {"title": "Bug", "type": "Issue", "state": "open", "url": "https://g/o/r/issues/5"},
-                 "repository": {"name": "r", "nameWithOwner": "o/r"}}])),
-        (&["project", "list", "-R", "o/r", "--json", "id,title,state,openIssues"],
-         json!([{"id": 6, "title": "P", "state": "OPEN", "openIssues": 1}])),
-        (&["project", "view", "-R", "o/r", "6", "--json", "id,state"],
-         json!({"id": 6, "state": "CLOSED"})),
-        (&["project", "column", "list", "-R", "o/r", "6", "--json", "id,title,color,isDefault"],
-         json!([{"id": 8, "title": "Todo", "color": "#fff", "isDefault": true}])),
-        (&["runner", "list", "-R", "o/r", "--json", "id,name,status,busy,labels"],
-         json!([{"id": 12, "name": "r1", "status": "online", "busy": false,
-                 "labels": [{"id": 1, "name": "ubuntu", "type": "custom"}]}])),
-        (&["runner", "view", "-R", "o/r", "12", "--json", "id,busy"],
-         json!({"id": 12, "busy": true})),
+                 "repository": {"name": "r", "nameWithOwner": "o/r"}}]),
+        ),
+        (
+            &[
+                "project",
+                "list",
+                "-R",
+                "o/r",
+                "--json",
+                "id,title,state,openIssues",
+            ],
+            json!([{"id": 6, "title": "P", "state": "OPEN", "openIssues": 1}]),
+        ),
+        (
+            &["project", "view", "-R", "o/r", "6", "--json", "id,state"],
+            json!({"id": 6, "state": "CLOSED"}),
+        ),
+        (
+            &[
+                "project",
+                "column",
+                "list",
+                "-R",
+                "o/r",
+                "6",
+                "--json",
+                "id,title,color,isDefault",
+            ],
+            json!([{"id": 8, "title": "Todo", "color": "#fff", "isDefault": true}]),
+        ),
+        (
+            &[
+                "runner",
+                "list",
+                "-R",
+                "o/r",
+                "--json",
+                "id,name,status,busy,labels",
+            ],
+            json!([{"id": 12, "name": "r1", "status": "online", "busy": false,
+                 "labels": [{"id": 1, "name": "ubuntu", "type": "custom"}]}]),
+        ),
+        (
+            &["runner", "view", "-R", "o/r", "12", "--json", "id,busy"],
+            json!({"id": 12, "busy": true}),
+        ),
     ];
     for (args, want) in cases {
         assert_eq!(&json_out(&server, args), want, "{args:?}");
@@ -454,8 +647,18 @@ fn gtx_only_lists_json_use_camel_case() {
 #[test]
 fn api_takes_q_and_prints_compact_json() {
     let server = FakeGitea::start(|_| r#"{"a": [1, 2], "b": "x"}"#.into());
-    server.gtx().args(["api", "repos/o/r", "-q", ".b"]).assert().success().stdout("x\n");
-    server.gtx().args(["api", "repos/o/r"]).assert().success().stdout("{\"a\":[1,2],\"b\":\"x\"}\n");
+    server
+        .gtx()
+        .args(["api", "repos/o/r", "-q", ".b"])
+        .assert()
+        .success()
+        .stdout("x\n");
+    server
+        .gtx()
+        .args(["api", "repos/o/r"])
+        .assert()
+        .success()
+        .stdout("{\"a\":[1,2],\"b\":\"x\"}\n");
 }
 
 const TWO_ISSUES: &str = r#"[
@@ -464,7 +667,14 @@ const TWO_ISSUES: &str = r#"[
 ]"#;
 
 fn stdout_of(server: &FakeGitea, args: &[&str]) -> String {
-    let out = server.gtx().args(args).assert().success().get_output().stdout.clone();
+    let out = server
+        .gtx()
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     String::from_utf8(out).unwrap()
 }
 
@@ -474,8 +684,14 @@ fn template_formats_json_fields() {
     let out = stdout_of(
         &server,
         &[
-            "issue", "list", "-R", "o/r", "--json", "number,title,author,labels,createdAt",
-            "-t", r#"{{range .}}#{{.number}} {{.title}} by {{.author.login}} [{{join ", " (pluck "name" .labels)}}] {{timefmt "2006-01-02 15:04" .createdAt}}{{"\n"}}{{end}}"#,
+            "issue",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
+            "number,title,author,labels,createdAt",
+            "-t",
+            r#"{{range .}}#{{.number}} {{.title}} by {{.author.login}} [{{join ", " (pluck "name" .labels)}}] {{timefmt "2006-01-02 15:04" .createdAt}}{{"\n"}}{{end}}"#,
         ],
     );
     assert_eq!(
@@ -490,11 +706,20 @@ fn template_tablerow_aligns_columns() {
     let out = stdout_of(
         &server,
         &[
-            "issue", "list", "-R", "o/r", "--json", "number,title",
-            "--template", r#"{{range .}}{{tablerow .number .title (truncate 7 .title)}}{{end}}{{tablerender}}done{{"\n"}}"#,
+            "issue",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
+            "number,title",
+            "--template",
+            r#"{{range .}}{{tablerow .number .title (truncate 7 .title)}}{{end}}{{tablerender}}done{{"\n"}}"#,
         ],
     );
-    assert_eq!(out, "5    Bug              Bug\n123  Feature request  Feat...\ndone\n");
+    assert_eq!(
+        out,
+        "5    Bug              Bug\n123  Feature request  Feat...\ndone\n"
+    );
 }
 
 #[test]
@@ -507,12 +732,16 @@ fn template_requires_json_and_excludes_jq() {
         .failure();
     server
         .gtx()
-        .args(["issue", "list", "-R", "o/r", "--json", "number", "-q", ".", "-t", "{{.}}"])
+        .args([
+            "issue", "list", "-R", "o/r", "--json", "number", "-q", ".", "-t", "{{.}}",
+        ])
         .assert()
         .failure();
     server
         .gtx()
-        .args(["issue", "list", "-R", "o/r", "--json", "number", "-t", "{{.nope"])
+        .args([
+            "issue", "list", "-R", "o/r", "--json", "number", "-t", "{{.nope",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("template"));
@@ -521,6 +750,9 @@ fn template_requires_json_and_excludes_jq() {
 #[test]
 fn api_template_formats_response() {
     let server = FakeGitea::start(|_| r#"{"full_name":"o/r","stars_count":7}"#.to_string());
-    let out = stdout_of(&server, &["api", "repos/o/r", "-t", "{{.full_name}}: {{.stars_count}}"]);
+    let out = stdout_of(
+        &server,
+        &["api", "repos/o/r", "-t", "{{.full_name}}: {{.stars_count}}"],
+    );
     assert_eq!(out, "o/r: 7");
 }

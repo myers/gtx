@@ -2,10 +2,10 @@ use clap::{Args, Subcommand};
 use eyre::Result;
 
 use crate::config::Config;
-use crate::json::{Field, field, gh};
-use gitea_api::types::ActionVariable;
 use crate::issues::atty_check;
+use crate::json::{Field, field, gh};
 use crate::repo;
+use gitea_api::types::ActionVariable;
 
 #[derive(Args)]
 pub struct VariableCommand {
