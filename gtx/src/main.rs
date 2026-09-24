@@ -128,8 +128,23 @@ struct CompletionArgs {
     shell: clap_complete::Shell,
 }
 
+/// Rust ignores SIGPIPE, so `println!` into a closed pipe (`gtx ... | head -1`)
+/// panics. Put back the default disposition: like gh (Go kills itself with
+/// SIGPIPE on EPIPE to stdout) and other Unix tools, gtx then dies quietly
+/// and the shell sees status 141. Network sockets are unaffected (std sends
+/// with MSG_NOSIGNAL).
+fn restore_default_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: called first thing in main; resetting a signal disposition to
+    // its default has no memory-safety preconditions.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    restore_default_sigpipe();
     color_eyre::install().ok();
 
     let result = async {

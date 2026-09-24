@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "gtx"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -723,6 +723,7 @@ dependencies = [
  "jaq-core",
  "jaq-json",
  "jaq-std",
+ "libc",
  "predicates",
  "regex-lite",
  "reqwest",
