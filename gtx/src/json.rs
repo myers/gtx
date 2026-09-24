@@ -1,7 +1,7 @@
 use clap::Args;
 use eyre::Result;
 
-/// Shared `--json` and `--jq` flags.
+/// Shared `--json`, `--jq` and `--template` flags.
 #[derive(Args, Clone, Default, Debug)]
 pub struct JsonArgs {
     /// Output JSON with the specified fields (comma-separated); with no
@@ -12,6 +12,11 @@ pub struct JsonArgs {
     /// Filter JSON output using a jq expression (requires --json)
     #[arg(short = 'q', long = "jq", value_name = "EXPR", requires = "json")]
     pub jq_expr: Option<String>,
+
+    /// Format JSON output using a Go template; see "gh help formatting"
+    /// (requires --json)
+    #[arg(short = 't', long, value_name = "STRING", requires = "json", conflicts_with = "jq_expr")]
+    pub template: Option<String>,
 }
 
 impl JsonArgs {
@@ -39,6 +44,7 @@ impl JsonArgs {
         Ok(Some(Selection {
             fields: chosen,
             jq: self.jq_expr.clone(),
+            template: self.template.clone(),
         }))
     }
 }
@@ -59,6 +65,7 @@ pub const fn field<T>(name: &'static str, get: fn(&T) -> serde_json::Value) -> F
 pub struct Selection<'f, T> {
     fields: Vec<&'f Field<T>>,
     jq: Option<String>,
+    template: Option<String>,
 }
 
 impl<T> Selection<'_, T> {
@@ -88,6 +95,9 @@ impl<T> Selection<'_, T> {
     }
 
     fn write(&self, value: &serde_json::Value) -> Result<()> {
+        if let Some(src) = &self.template {
+            return crate::template::print(src, value);
+        }
         match &self.jq {
             Some(expr) => print_jq(value, expr),
             None => print_json(value),

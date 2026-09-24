@@ -27,6 +27,7 @@ mod search;
 mod secret;
 mod ssh_key;
 mod status;
+mod template;
 mod variable;
 mod workflow;
 
@@ -217,4 +218,14 @@ async fn run_app(app: App) -> eyre::Result<()> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    /// clap's own consistency checks over every subcommand: catches a
+    /// shared flag (like `--template`'s `-t`) clashing with a command's own.
+    #[test]
+    fn cli_is_consistent() {
+        <super::App as clap::CommandFactory>::command().debug_assert();
+    }
 }

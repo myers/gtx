@@ -38,6 +38,10 @@ pub struct ApiCommand {
     #[arg(short = 'q', long = "jq", value_name = "EXPR")]
     jq_expr: Option<String>,
 
+    /// Format JSON output using a Go template; see "gh help formatting"
+    #[arg(short = 't', long, value_name = "STRING", conflicts_with = "jq_expr")]
+    template: Option<String>,
+
     /// Make additional requests to fetch all pages
     #[arg(long)]
     paginate: bool,
@@ -234,7 +238,10 @@ impl ApiCommand {
     }
 
     fn output(&self, text: &str) -> Result<()> {
-        if let Some(ref expr) = self.jq_expr {
+        if let Some(ref src) = self.template {
+            let parsed: serde_json::Value = serde_json::from_str(text)?;
+            crate::template::print(src, &parsed)?;
+        } else if let Some(ref expr) = self.jq_expr {
             let parsed: serde_json::Value = serde_json::from_str(text)?;
             crate::json::print_jq(&parsed, expr)?;
         } else {

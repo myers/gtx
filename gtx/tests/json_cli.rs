@@ -457,3 +457,70 @@ fn api_takes_q_and_prints_compact_json() {
     server.gtx().args(["api", "repos/o/r", "-q", ".b"]).assert().success().stdout("x\n");
     server.gtx().args(["api", "repos/o/r"]).assert().success().stdout("{\"a\":[1,2],\"b\":\"x\"}\n");
 }
+
+const TWO_ISSUES: &str = r#"[
+  {"id":11,"number":5,"title":"Bug","state":"open","user":{"id":3,"login":"alice"},"labels":[{"id":1,"name":"bug"},{"id":2,"name":"ui"}],"created_at":"2026-01-01T10:20:30Z"},
+  {"id":12,"number":123,"title":"Feature request","state":"open","user":{"id":4,"login":"bob"},"labels":[],"created_at":"2026-01-02T00:00:00Z"}
+]"#;
+
+fn stdout_of(server: &FakeGitea, args: &[&str]) -> String {
+    let out = server.gtx().args(args).assert().success().get_output().stdout.clone();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn template_formats_json_fields() {
+    let server = FakeGitea::start(|_| TWO_ISSUES.to_string());
+    let out = stdout_of(
+        &server,
+        &[
+            "issue", "list", "-R", "o/r", "--json", "number,title,author,labels,createdAt",
+            "-t", r#"{{range .}}#{{.number}} {{.title}} by {{.author.login}} [{{join ", " (pluck "name" .labels)}}] {{timefmt "2006-01-02 15:04" .createdAt}}{{"\n"}}{{end}}"#,
+        ],
+    );
+    assert_eq!(
+        out,
+        "#5 Bug by alice [bug, ui] 2026-01-01 10:20\n#123 Feature request by bob [] 2026-01-02 00:00\n"
+    );
+}
+
+#[test]
+fn template_tablerow_aligns_columns() {
+    let server = FakeGitea::start(|_| TWO_ISSUES.to_string());
+    let out = stdout_of(
+        &server,
+        &[
+            "issue", "list", "-R", "o/r", "--json", "number,title",
+            "--template", r#"{{range .}}{{tablerow .number .title (truncate 7 .title)}}{{end}}{{tablerender}}done{{"\n"}}"#,
+        ],
+    );
+    assert_eq!(out, "5    Bug              Bug\n123  Feature request  Feat...\ndone\n");
+}
+
+#[test]
+fn template_requires_json_and_excludes_jq() {
+    let server = FakeGitea::start(|_| TWO_ISSUES.to_string());
+    server
+        .gtx()
+        .args(["issue", "list", "-R", "o/r", "-t", "{{.}}"])
+        .assert()
+        .failure();
+    server
+        .gtx()
+        .args(["issue", "list", "-R", "o/r", "--json", "number", "-q", ".", "-t", "{{.}}"])
+        .assert()
+        .failure();
+    server
+        .gtx()
+        .args(["issue", "list", "-R", "o/r", "--json", "number", "-t", "{{.nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("template"));
+}
+
+#[test]
+fn api_template_formats_response() {
+    let server = FakeGitea::start(|_| r#"{"full_name":"o/r","stars_count":7}"#.to_string());
+    let out = stdout_of(&server, &["api", "repos/o/r", "-t", "{{.full_name}}: {{.stars_count}}"]);
+    assert_eq!(out, "o/r: 7");
+}

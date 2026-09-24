@@ -695,8 +695,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "gotmpl"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f8c7ae308224bc99eabb16a4adef18d7b540b13cd618e23b9494eee83aedad5"
+dependencies = [
+ "serde",
+ "smol_str",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gtx"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -707,6 +718,7 @@ dependencies = [
  "eyre",
  "gitea-api",
  "glob",
+ "gotmpl",
  "inquire",
  "jaq-core",
  "jaq-json",
@@ -720,6 +732,7 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "unicode-width",
  "url",
  "zip",
 ]
@@ -2126,6 +2139,12 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "smol_str"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
 
 [[package]]
 name = "socket2"
