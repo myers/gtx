@@ -57,6 +57,34 @@ struct ListArgs {
     #[arg(short = 'L', long, default_value = "30")]
     limit: i64,
 
+    /// Filter by label (all must match)
+    #[arg(short, long, value_delimiter = ',')]
+    label: Vec<String>,
+
+    /// Filter by assignee ("@me" for yourself)
+    #[arg(short, long)]
+    assignee: Option<String>,
+
+    /// Filter by author ("@me" for yourself)
+    #[arg(short = 'A', long)]
+    author: Option<String>,
+
+    /// Filter by base branch
+    #[arg(short = 'B', long)]
+    base: Option<String>,
+
+    /// Filter by head branch
+    #[arg(short = 'H', long)]
+    head: Option<String>,
+
+    /// Filter by draft state
+    #[arg(short, long)]
+    draft: bool,
+
+    /// Search pull requests with a keyword query
+    #[arg(short = 'S', long)]
+    search: Option<String>,
+
     #[command(flatten)]
     json: crate::json::JsonArgs,
 }
@@ -266,7 +294,11 @@ fn pr_base(p: &PullRequest) -> Option<&PrBranchInfo> {
 /// A branch's name. Gitea's `ref` becomes `refs/pull/N/head` once the head
 /// branch is deleted, while `label` stays the branch name gh reports.
 fn branch_name(b: Option<&PrBranchInfo>) -> serde_json::Value {
-    gh::v(b.and_then(|b| b.label.as_deref().or(b.ref_.as_deref())))
+    gh::v(branch_str(b))
+}
+
+fn branch_str(b: Option<&PrBranchInfo>) -> Option<&str> {
+    b.and_then(|b| b.label.as_deref().or(b.ref_.as_deref()))
 }
 
 /// gh's `pr list/view --json` fields that Gitea's pull request data can
@@ -491,29 +523,148 @@ async fn list_prs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
         other => eyre::bail!("Invalid state: {other}. Use open, closed, or all"),
     }
 
-    let state_str = args.state.clone();
-    let prs = paginate::paginate(args.limit, 50, |page, per_page| {
-        let api = &api;
-        let state_str = &state_str;
-        async move {
-            let mut req = api
-                .repo_list_pull_requests()
-                .owner(owner)
-                .repo(repo)
-                .page(page as u64)
-                .limit(per_page);
-            match state_str.as_str() {
-                "open" => req = req.state(gitea_api::types::RepoListPullRequestsState::Open),
-                "closed" => req = req.state(gitea_api::types::RepoListPullRequestsState::Closed),
-                _ => req = req.state(gitea_api::types::RepoListPullRequestsState::All),
-            }
-            Ok(req
-                .send()
-                .await
-                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-                .into_inner())
+    let none_found = || -> Result<()> {
+        if let Some(json) = &json {
+            return json.write_list(&[]);
         }
-    })
+        eprintln!("No pull requests found");
+        Ok(())
+    };
+
+    // Gitea ignores label IDs it doesn't know; gh matches no PRs then.
+    let Some(label_ids) =
+        crate::issue_meta::filter_label_ids(&api, owner, repo, &args.label).await?
+    else {
+        return none_found();
+    };
+    let mut people = Vec::new();
+    for login in [&args.assignee, &args.author] {
+        people.push(match login {
+            Some(l) => crate::issue_meta::resolve_logins(&api, std::slice::from_ref(l))
+                .await?
+                .pop(),
+            None => None,
+        });
+    }
+    let (assignee, author) = (people[0].clone(), people[1].clone());
+
+    // Gitea's pulls endpoint has no keyword search; its issues endpoint does,
+    // so find the matching PR numbers there.
+    let search_hits = match &args.search {
+        Some(q) => {
+            let hits = paginate::paginate(i64::MAX, 50, |page, per_page| {
+                let api = &api;
+                let state = args.state.as_str();
+                async move {
+                    let req = api
+                        .issue_list_issues()
+                        .owner(owner)
+                        .repo(repo)
+                        .type_(gitea_api::types::IssueListIssuesType::Pulls)
+                        .state(match state {
+                            "open" => gitea_api::types::IssueListIssuesState::Open,
+                            "closed" => gitea_api::types::IssueListIssuesState::Closed,
+                            _ => gitea_api::types::IssueListIssuesState::All,
+                        })
+                        .q(q.clone())
+                        .page(page)
+                        .limit(per_page);
+                    Ok(req
+                        .send()
+                        .await
+                        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                        .into_inner())
+                }
+            })
+            .await?;
+            let hits: std::collections::HashSet<i64> =
+                hits.iter().filter_map(|i| i.number).collect();
+            if hits.is_empty() {
+                return none_found();
+            }
+            Some(hits)
+        }
+        None => None,
+    };
+
+    // The pulls endpoint filters labels (any, not all), author and base
+    // server-side, and not every Gitea honors each; check every filter here
+    // too, so the result is right either way and `-L` counts matching PRs.
+    let keep = |pr: &PullRequest| {
+        let login = |u: &gitea_api::types::User| u.login.clone();
+        args.label
+            .iter()
+            .all(|l| pr.labels.iter().any(|pl| pl.name.as_ref() == Some(l)))
+            && assignee
+                .as_ref()
+                .is_none_or(|a| pr.assignees.iter().any(|u| login(u).as_ref() == Some(a)))
+            && author
+                .as_ref()
+                .is_none_or(|a| pr.user.as_ref().and_then(login).as_ref() == Some(a))
+            && args
+                .base
+                .as_ref()
+                .is_none_or(|b| branch_str(pr_base(pr)) == Some(b.as_str()))
+            && args
+                .head
+                .as_ref()
+                .is_none_or(|h| branch_str(pr_head(pr)) == Some(h.as_str()))
+            && (!args.draft || pr.draft == Some(true))
+            && search_hits
+                .as_ref()
+                .is_none_or(|hits| pr.number.is_some_and(|n| hits.contains(&n)))
+    };
+    let filtered = !args.label.is_empty()
+        || assignee.is_some()
+        || author.is_some()
+        || args.base.is_some()
+        || args.head.is_some()
+        || args.draft
+        || search_hits.is_some();
+    // Filtered pages may keep only a few PRs each, so fetch full pages then.
+    let per_page = if filtered { 50 } else { args.limit.min(50) };
+
+    let state_str = args.state.clone();
+    let prs = paginate::paginate_filtered(
+        args.limit,
+        per_page,
+        |page, per_page| {
+            let api = &api;
+            let state_str = &state_str;
+            let (label_ids, author) = (label_ids.clone(), author.clone());
+            let base = args.base.clone();
+            async move {
+                let mut req = api
+                    .repo_list_pull_requests()
+                    .owner(owner)
+                    .repo(repo)
+                    .page(page as u64)
+                    .limit(per_page);
+                match state_str.as_str() {
+                    "open" => req = req.state(gitea_api::types::RepoListPullRequestsState::Open),
+                    "closed" => {
+                        req = req.state(gitea_api::types::RepoListPullRequestsState::Closed)
+                    }
+                    _ => req = req.state(gitea_api::types::RepoListPullRequestsState::All),
+                }
+                if !label_ids.is_empty() {
+                    req = req.labels(label_ids);
+                }
+                if let Some(v) = author {
+                    req = req.poster(v);
+                }
+                if let Some(v) = base {
+                    req = req.base_branch(v);
+                }
+                Ok(req
+                    .send()
+                    .await
+                    .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                    .into_inner())
+            }
+        },
+        keep,
+    )
     .await?;
 
     if let Some(json) = json {
