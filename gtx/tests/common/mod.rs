@@ -148,6 +148,7 @@ impl FakeGitea {
         cmd.env("GITEA_URL", &self.url)
             .env("GITEA_TOKEN", "t")
             .env_remove("GITEA_SERVER")
+            .env_remove("GTX_DEBUG")
             .env("GTX_CONFIG", "/nonexistent/gtx-test.toml");
         cmd
     }

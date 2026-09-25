@@ -27,6 +27,10 @@ You can generate a token at `https://your-instance/user/settings/applications`.
 
 `gtx auth login` writes `~/.config/gtx/config.toml`; set `GTX_CONFIG` to use another file. `GITEA_URL`, `GITEA_TOKEN`, `GITEA_SERVER` (selects a `[servers.NAME]` profile) and `GITEA_REPO` override it. A config left in `~/.config/gt` from before the rename is copied across on first run.
 
+### Debugging
+
+As with gh's `GH_DEBUG`, set `GTX_DEBUG=api` to print HTTP request/response transcripts, bodies included, on stderr; any other truthy value (`GTX_DEBUG=1`) prints headers only. `gtx api --verbose` does the same for a single API call. Tokens and cookies are masked; `gtx api --show-secrets` unmasks them.
+
 ## Usage
 
 ```
@@ -64,10 +68,8 @@ Commands:
   help          Print this message or the help of the given subcommand(s)
 
 Options:
-  -v, --verbose...    Print HTTP request/response transcripts on stderr. Repeat for more detail (`-vv` includes request/response bodies). Tokens are masked unless `--show-secrets` is passed
-      --show-secrets  With `-v`, print Authorization/Cookie header values unmasked. Off by default — paste-into-chat safety
-  -h, --help          Print help
-  -V, --version       Print version
+  -h, --help     Print help
+  -V, --version  Print version
 ```
 
 ## License

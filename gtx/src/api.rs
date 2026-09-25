@@ -46,11 +46,20 @@ pub struct ApiCommand {
     #[arg(long)]
     paginate: bool,
 
+    /// Include full HTTP request and response in the output
+    #[arg(long)]
+    pub(crate) verbose: bool,
+
     /// Print the equivalent curl command (with masked token) and exit
     /// without making the request. Pair with `--show-secrets` if you need
     /// the real token in the output.
     #[arg(long)]
     curl: bool,
+
+    /// With `--verbose` or `--curl`, print Authorization/Cookie header
+    /// values unmasked. Off by default — paste-into-chat safety.
+    #[arg(long)]
+    pub(crate) show_secrets: bool,
 }
 
 impl ApiCommand {
@@ -88,9 +97,7 @@ impl ApiCommand {
         };
 
         if self.curl {
-            let show_secrets = gitea_api::verbose::config()
-                .map(|c| c.show_secrets)
-                .unwrap_or(false);
+            let show_secrets = self.show_secrets;
             let line = build_curl_command(
                 &method,
                 &url,

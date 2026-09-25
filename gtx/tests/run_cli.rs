@@ -651,18 +651,22 @@ fn run_view_lists_jobs_like_gh() {
     );
 }
 
-/// `-v` shows every job's steps.
+/// `-v`/`--verbose` shows every job's steps, and only that: no HTTP
+/// transcript on stderr (#33).
 #[test]
 fn run_view_verbose_shows_all_steps() {
-    let server = failed_run_server();
-    server
-        .gtx()
-        .args(["run", "view", "50", "-R", "o/r", "-v"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "✓ build in 1m3s (ID 61)\n  ✓ checkout\n  ✓ test\nX lint",
-        ));
+    for flag in ["-v", "--verbose"] {
+        let server = failed_run_server();
+        server
+            .gtx()
+            .args(["run", "view", "50", "-R", "o/r", flag])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "✓ build in 1m3s (ID 61)\n  ✓ checkout\n  ✓ test\nX lint",
+            ))
+            .stderr(predicate::str::is_empty());
+    }
 }
 
 /// `--job` views one job of its run, with its steps.

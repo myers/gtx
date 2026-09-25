@@ -1,4 +1,4 @@
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod alias;
 mod api;
@@ -45,17 +45,6 @@ const VERSION: &str = concat!(
 #[derive(Parser)]
 #[command(name = "gtx", about = "Gitea CLI", version = VERSION)]
 struct App {
-    /// Print HTTP request/response transcripts on stderr. Repeat for more
-    /// detail (`-vv` includes request/response bodies). Tokens are masked
-    /// unless `--show-secrets` is passed.
-    #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true)]
-    verbose: u8,
-
-    /// With `-v`, print Authorization/Cookie header values unmasked. Off
-    /// by default — paste-into-chat safety.
-    #[arg(long = "show-secrets", global = true)]
-    show_secrets: bool,
-
     #[command(subcommand)]
     command: Command,
 }
@@ -184,11 +173,33 @@ async fn main() {
     }
 }
 
+/// Transcript level for a `GTX_DEBUG` value, read the way gh reads
+/// `GH_DEBUG`: unset, empty, `0`, `false` or `no` is off; a value containing
+/// `api` logs headers and bodies; anything else logs headers only.
+fn debug_level(value: Option<&str>) -> u8 {
+    match value {
+        None | Some("" | "0" | "false" | "no") => 0,
+        Some(v) if v.contains("api") => 2,
+        Some(_) => 1,
+    }
+}
+
 async fn run_app(app: App) -> eyre::Result<()> {
-    if app.verbose > 0 || app.show_secrets {
+    // HTTP transcripts come from `GTX_DEBUG` (gh's `GH_DEBUG`) or
+    // `gtx api --verbose`; gh has no global `-v`.
+    let (api_verbose, show_secrets) = match &app.command {
+        Command::Api(cmd) => (cmd.verbose, cmd.show_secrets),
+        _ => (false, false),
+    };
+    let level = if api_verbose {
+        2
+    } else {
+        debug_level(std::env::var("GTX_DEBUG").ok().as_deref())
+    };
+    if level > 0 || show_secrets {
         gitea_api::verbose::set_config(gitea_api::verbose::VerboseConfig {
-            level: app.verbose,
-            show_secrets: app.show_secrets,
+            level,
+            show_secrets,
         });
     }
 

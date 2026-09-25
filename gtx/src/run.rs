@@ -255,6 +255,10 @@ struct ViewArgs {
     #[arg(long)]
     exit_status: bool,
 
+    /// Show job steps
+    #[arg(short, long)]
+    verbose: bool,
+
     #[command(flatten)]
     json: crate::json::JsonArgs,
 }
@@ -701,9 +705,7 @@ async fn view_run(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     } else {
         Vec::new()
     };
-    // gh's `-v` is gtx's global `-v`/`--verbose` (which also turns on HTTP
-    // transcripts on stderr).
-    let verbose = gitea_api::verbose::config().is_some_and(|c| c.is_on());
+    let verbose = args.verbose;
     let view = TextView {
         run: &run,
         jobs: &jobs,
