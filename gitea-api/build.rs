@@ -73,6 +73,21 @@ fn accept_any_2xx(spec: &mut Value) {
     }
 }
 
+/// Fields the server sends that its swagger omits: Gitea's
+/// `ActionWorkflowRun` has `created_at`/`updated_at` (#30).
+fn add_missing_fields(spec: &mut Value) {
+    const MISSING: &[(&str, &[&str])] = &[("ActionWorkflowRun", &["created_at", "updated_at"])];
+    for (schema, fields) in MISSING {
+        let props = &mut spec["components"]["schemas"][schema]["properties"];
+        assert!(props.is_object(), "schema {schema} has no properties");
+        for field in *fields {
+            if props.get(field).is_none() {
+                props[field] = json!({ "type": "string", "format": "date-time" });
+            }
+        }
+    }
+}
+
 fn main() {
     let src = "openapi.v1.json";
     println!("cargo:rerun-if-changed={src}");
@@ -80,6 +95,7 @@ fn main() {
     let file = File::open(src).unwrap();
     let mut spec: Value = serde_json::from_reader(file).unwrap();
     accept_any_2xx(&mut spec);
+    add_missing_fields(&mut spec);
     let spec = serde_json::from_value(spec).unwrap();
 
     let mut settings = progenitor::GenerationSettings::new();

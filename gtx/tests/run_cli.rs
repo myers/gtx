@@ -310,3 +310,82 @@ fn run_download_withholds_token_from_foreign_redirect() {
     );
     assert_eq!(blob.auth(), vec![None]);
 }
+
+/// A queued run: Gitea reports `started_at`/`completed_at` as the Unix epoch
+/// until a runner picks it up, but `created_at`/`updated_at` are real (#30).
+const QUEUED_RUN: &str = r#"{"id":9,"status":"queued","display_title":"t","head_branch":"main",
+    "created_at":"2020-05-06T07:08:09Z","updated_at":"2020-05-06T07:08:10Z",
+    "started_at":"1970-01-01T00:00:00Z","completed_at":"1970-01-01T00:00:00Z"}"#;
+
+#[test]
+fn run_list_times_come_from_created_and_updated_at() {
+    let server =
+        FakeGitea::start(|_| format!(r#"{{"total_count":1,"workflow_runs":[{QUEUED_RUN}]}}"#));
+    let out = server
+        .gtx()
+        .args([
+            "run",
+            "list",
+            "-R",
+            "o/r",
+            "--json",
+            "createdAt,updatedAt,startedAt",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    // gh prints an unset time as Go's zero time.
+    assert_eq!(
+        v,
+        serde_json::json!([{
+            "createdAt": "2020-05-06T07:08:09Z",
+            "updatedAt": "2020-05-06T07:08:10Z",
+            "startedAt": "0001-01-01T00:00:00Z",
+        }])
+    );
+
+    server
+        .gtx()
+        .args(["run", "list", "-R", "o/r"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2020-05-06"))
+        .stdout(predicate::str::contains("1970").not());
+}
+
+#[test]
+fn run_view_jobs_unset_times_are_go_zero_time() {
+    let server = FakeGitea::start(|target| {
+        if target.starts_with("/api/v1/repos/o/r/actions/runs/9/jobs") {
+            r#"{"total_count":1,"jobs":[{"id":1,"name":"build","status":"queued",
+                "started_at":"1970-01-01T00:00:00Z","completed_at":"0001-01-01T00:00:00Z",
+                "steps":[{"name":"s","number":1,"status":"queued",
+                    "started_at":"1970-01-01T00:00:00Z"}]}]}"#
+                .into()
+        } else {
+            QUEUED_RUN.into()
+        }
+    });
+    server
+        .gtx()
+        .args([
+            "run",
+            "view",
+            "9",
+            "-R",
+            "o/r",
+            "--json",
+            "createdAt,jobs",
+            "--jq",
+            "[.createdAt, .jobs[0].startedAt, .jobs[0].completedAt, .jobs[0].steps[0].startedAt, .jobs[0].steps[0].completedAt] | join(\" \")",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            "2020-05-06T07:08:09Z 0001-01-01T00:00:00Z 0001-01-01T00:00:00Z \
+             0001-01-01T00:00:00Z 0001-01-01T00:00:00Z\n",
+        );
+}

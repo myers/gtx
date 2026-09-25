@@ -1,3 +1,4 @@
+use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Args, Subcommand};
 use eyre::Result;
 
@@ -301,17 +302,29 @@ fn run_workflow_name(run: &ActionWorkflowRun) -> Option<&str> {
     Some(file.rsplit('/').next().unwrap_or(file))
 }
 
-/// gh's `run list --json` fields. Gitea's run API has no creation time or
-/// numeric workflow ID: `createdAt` is when the run started, `updatedAt`
-/// when it completed (or started), and `name`/`workflowName` are the
-/// workflow's file name.
+/// A run/job/step time, or `None` when Gitea reports it unset: the Unix
+/// epoch (e.g. `started_at` of a queued run) or Go's zero time.
+fn set_time(t: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    t.filter(|t| t.timestamp() > 0)
+}
+
+/// A run/job/step time as gh prints it: unset times are Go's zero time,
+/// `0001-01-01T00:00:00Z`, not `null`.
+fn run_time(t: Option<DateTime<Utc>>) -> serde_json::Value {
+    let zero = NaiveDate::from_ymd_opt(1, 1, 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|t| t.and_utc());
+    gh::time(set_time(t).or(zero))
+}
+
 /// gh's `run list/view --json` fields, plus any `$extra` fields. A macro so
-/// the same getters serve `ActionWorkflowRun` and [`RunView`].
+/// the same getters serve `ActionWorkflowRun` and [`RunView`]. Gitea has no
+/// numeric workflow ID: `name`/`workflowName` are the workflow's file name.
 macro_rules! run_fields {
     ($($extra:expr),* $(,)?) => { &[
     field("attempt", |r| gh::v(r.run_attempt)),
     field("conclusion", |r| gh::v(r.conclusion.as_deref().unwrap_or(""))),
-    field("createdAt", |r| gh::time(r.started_at)),
+    field("createdAt", |r| run_time(r.created_at)),
     field("databaseId", |r| gh::v(r.id)),
     field("displayTitle", |r| gh::v(&r.display_title)),
     field("event", |r| gh::v(&r.event)),
@@ -319,9 +332,9 @@ macro_rules! run_fields {
     field("headSha", |r| gh::v(&r.head_sha)),
     field("name", |r| gh::v(run_workflow_name(r))),
     field("number", |r| gh::v(r.run_number)),
-    field("startedAt", |r| gh::time(r.started_at)),
+    field("startedAt", |r| run_time(r.started_at)),
     field("status", |r| gh::v(&r.status)),
-    field("updatedAt", |r| gh::time(r.completed_at.or(r.started_at))),
+    field("updatedAt", |r| run_time(r.updated_at)),
     field("url", |r| gh::v(&r.html_url)),
     field("workflowName", |r| gh::v(run_workflow_name(r))),
     $($extra),*
@@ -354,21 +367,21 @@ fn gh_job(j: &gitea_api::types::ActionWorkflowJob) -> serde_json::Value {
         .iter()
         .map(|s| {
             serde_json::json!({
-                "completedAt": gh::time(s.completed_at),
+                "completedAt": run_time(s.completed_at),
                 "conclusion": s.conclusion.as_deref().unwrap_or(""),
                 "name": s.name,
                 "number": s.number,
-                "startedAt": gh::time(s.started_at),
+                "startedAt": run_time(s.started_at),
                 "status": s.status,
             })
         })
         .collect();
     serde_json::json!({
-        "completedAt": gh::time(j.completed_at),
+        "completedAt": run_time(j.completed_at),
         "conclusion": j.conclusion.as_deref().unwrap_or(""),
         "databaseId": j.id,
         "name": j.name,
-        "startedAt": gh::time(j.started_at),
+        "startedAt": run_time(j.started_at),
         "status": j.status,
         "steps": steps,
         "url": j.html_url,
@@ -470,7 +483,7 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let is_tty = atty_check();
     if is_tty {
         println!(
-            "{:<8} {:<30} {:<12} {:<10} STARTED",
+            "{:<8} {:<30} {:<12} {:<10} AGE",
             "ID", "TITLE", "STATUS", "BRANCH"
         );
     }
@@ -485,11 +498,13 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
         };
         let status = run.status.as_deref().unwrap_or("");
         let branch = run.head_branch.as_deref().unwrap_or("");
-        let started = run.started_at.map(relative_time).unwrap_or_default();
+        let age = set_time(run.created_at)
+            .map(relative_time)
+            .unwrap_or_default();
 
         println!(
             "{:<8} {:<30} {:<12} {:<10} {}",
-            id, truncated, status, branch, started
+            id, truncated, status, branch, age
         );
     }
 
