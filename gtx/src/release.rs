@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::issues::{atty_check, relative_time};
 use crate::json::{Field, field, gh};
 use crate::paginate;
+use crate::prompt::can_prompt;
 use crate::repo;
 use gitea_api::types::Release;
 
@@ -542,10 +543,6 @@ fn api_error(e: impl Into<gitea_api::GiteaError>) -> eyre::Report {
 }
 
 /// Whether we can ask the user questions (stdin and stdout are terminals), as gh's `CanPrompt`.
-fn can_prompt() -> bool {
-    std::io::IsTerminal::is_terminal(&std::io::stdin()) && atty_check()
-}
-
 /// Release notes from `--notes`, or `--notes-file` ("-" for stdin).
 fn read_notes(notes: &Option<String>, notes_file: &Option<String>) -> Result<Option<String>> {
     Ok(match (notes, notes_file.as_deref()) {

@@ -51,6 +51,7 @@ Commands:
   notification  Manage notifications
   workflow      Manage Actions workflows
   org           Manage organizations
+  package       Manage packages
   ssh-key       Manage your SSH keys
   gpg-key       Manage your GPG keys
   alias         Manage command aliases

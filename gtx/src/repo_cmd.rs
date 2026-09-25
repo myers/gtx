@@ -90,9 +90,9 @@ struct ForkArgs {
 
 #[derive(Args)]
 struct DeleteRepoArgs {
-    /// Confirm deletion (required)
+    /// Confirm deletion without prompting
     #[arg(long)]
-    confirm: bool,
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -511,14 +511,12 @@ async fn fork_repo(args: &ForkArgs) -> Result<()> {
 }
 
 async fn delete_repo(repo_args: &repo::RepoArgs, args: &DeleteRepoArgs) -> Result<()> {
-    if !args.confirm {
-        eyre::bail!("Use --confirm to delete the repository. This cannot be undone.");
-    }
-
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
+    let slug = format!("{owner}/{repo}");
+    crate::prompt::confirm_deletion(args.yes, &slug, &slug)?;
 
     api.repo_delete()
         .owner(owner)

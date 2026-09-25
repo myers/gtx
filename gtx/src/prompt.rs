@@ -22,3 +22,27 @@ pub fn edit_body(initial: &str) -> Result<String> {
 
     Ok(std::fs::read_to_string(&path)?.trim().to_string())
 }
+
+/// Whether gtx may ask the user something: stdin and stdout are both
+/// terminals, as gh's `IO.CanPrompt()`.
+pub fn can_prompt() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin()) && crate::issues::atty_check()
+}
+
+/// gh's guard for an irreversible delete (`gh repo delete`): without
+/// `--yes`, ask on a terminal for `answer` to be typed back, and refuse
+/// outright when there is no terminal to ask on.
+pub fn confirm_deletion(yes: bool, what: &str, answer: &str) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !can_prompt() {
+        eyre::bail!("--yes required when not running interactively");
+    }
+    let typed =
+        inquire::Text::new(&format!("Type {answer} to confirm deletion of {what}:")).prompt()?;
+    if typed.trim() != answer {
+        eyre::bail!("Cancelled: {typed:?} does not match {answer:?}");
+    }
+    Ok(())
+}

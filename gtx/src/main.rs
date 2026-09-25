@@ -15,6 +15,7 @@ mod label;
 mod milestone;
 mod notification;
 mod org;
+mod package;
 mod paginate;
 mod project;
 mod prompt;
@@ -91,6 +92,8 @@ enum Command {
     Workflow(workflow::WorkflowCommand),
     /// Manage organizations
     Org(org::OrgCommand),
+    /// Manage packages
+    Package(package::PackageCommand),
     /// Manage your SSH keys
     SshKey(ssh_key::SshKeyCommand),
     /// Manage your GPG keys
@@ -205,6 +208,7 @@ async fn run_app(app: App) -> eyre::Result<()> {
         Command::Notification(cmd) => cmd.run().await,
         Command::Workflow(cmd) => cmd.run().await,
         Command::Org(cmd) => cmd.run().await,
+        Command::Package(cmd) => cmd.run().await,
         Command::SshKey(cmd) => cmd.run().await,
         Command::GpgKey(cmd) => cmd.run().await,
         Command::Alias(cmd) => cmd.run().await,
