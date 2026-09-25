@@ -173,25 +173,24 @@ struct EditArgs {
     /// PR number
     number: i64,
 
-    /// New title
+    /// Set the new title
     #[arg(short, long)]
     title: Option<String>,
 
-    /// New body
-    #[arg(short, long)]
+    /// Set the new body
+    #[arg(short, long, conflicts_with = "body_file")]
     body: Option<String>,
 
-    /// Add labels (comma-separated names, looked up by name)
-    #[arg(short, long)]
-    label: Vec<String>,
+    /// Read body text from file
+    #[arg(short = 'F', long)]
+    body_file: Option<String>,
 
-    /// Set assignees (comma-separated usernames, replaces existing)
-    #[arg(short, long)]
-    assignee: Vec<String>,
+    /// Change the base branch for this pull request
+    #[arg(short = 'B', long)]
+    base: Option<String>,
 
-    /// Set milestone (by name)
-    #[arg(short, long)]
-    milestone: Option<String>,
+    #[command(flatten)]
+    meta: crate::issue_meta::EditMeta,
 }
 
 #[derive(Args)]
@@ -1103,86 +1102,42 @@ async fn diff_pr(repo_args: &repo::RepoArgs, args: &DiffArgs) -> Result<()> {
 }
 
 async fn edit_pr(repo_args: &repo::RepoArgs, args: &EditArgs) -> Result<()> {
+    let body = match args.body_file {
+        Some(ref path) => Some(crate::body::read_body_file(path)?),
+        None => args.body.clone(),
+    };
+    if args.title.is_none() && body.is_none() && args.base.is_none() && args.meta.is_empty() {
+        eyre::bail!("field to edit flag required when not running interactively");
+    }
+
     let config = Config::load()?;
     let api = config.client()?;
 
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    // Resolve label names to IDs if provided
-    let label_ids = if args.label.is_empty() {
-        vec![]
-    } else {
-        let labels = api
-            .issue_list_labels()
+    if let Some(ref base) = args.base {
+        api.repo_edit_pull_request()
             .owner(owner)
             .repo(repo)
+            .index(args.number)
+            .body_map(|b| b.base(base.clone()))
             .send()
             .await
-            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-            .into_inner();
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
+    }
 
-        let mut ids = Vec::new();
-        for name in &args.label {
-            match labels
-                .iter()
-                .find(|l| l.name.as_deref() == Some(name.as_str()))
-            {
-                Some(l) => ids.push(l.id.unwrap_or(0)),
-                None => eyre::bail!("Label not found: {name}"),
-            }
-        }
-        ids
-    };
-
-    // Resolve milestone name to ID if provided
-    let milestone_id = if let Some(ref ms_name) = args.milestone {
-        let milestones = api
-            .issue_get_milestones_list()
-            .owner(owner)
-            .repo(repo)
-            .send()
-            .await
-            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-            .into_inner();
-        match milestones
-            .iter()
-            .find(|m| m.title.as_deref() == Some(ms_name.as_str()))
-        {
-            Some(m) => Some(m.id.unwrap_or(0)),
-            None => eyre::bail!("Milestone not found: {ms_name}"),
-        }
-    } else {
-        None
-    };
-
-    api.repo_edit_pull_request()
-        .owner(owner)
-        .repo(repo)
-        .index(args.number)
-        .body_map(|mut b| {
-            if let Some(ref title) = args.title {
-                b = b.title(title.clone());
-            }
-            if let Some(ref body) = args.body {
-                b = b.body(body.clone());
-            }
-            if !label_ids.is_empty() {
-                b = b.labels(label_ids.clone());
-            }
-            if !args.assignee.is_empty() {
-                b = b.assignees(args.assignee.clone());
-            }
-            if let Some(ms) = milestone_id {
-                b = b.milestone(ms);
-            }
-            b
-        })
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
-
-    eprintln!("Updated PR #{}", args.number);
+    let issue = crate::issue_meta::edit(
+        &api,
+        owner,
+        repo,
+        args.number,
+        args.title.as_deref(),
+        body.as_deref(),
+        &args.meta,
+    )
+    .await?;
+    println!("{}", issue.html_url.as_deref().unwrap_or_default());
     Ok(())
 }
 

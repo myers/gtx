@@ -48,16 +48,24 @@ enum IssueAction {
 
 #[derive(Args)]
 struct EditArgs {
-    /// Issue number
-    number: i64,
+    /// Issue numbers
+    #[arg(required = true)]
+    numbers: Vec<i64>,
 
-    /// New title
+    /// Set the new title
     #[arg(short, long)]
     title: Option<String>,
 
-    /// New body
-    #[arg(short, long)]
+    /// Set the new body
+    #[arg(short, long, conflicts_with = "body_file")]
     body: Option<String>,
+
+    /// Read body text from file
+    #[arg(short = 'F', long)]
+    body_file: Option<String>,
+
+    #[command(flatten)]
+    meta: crate::issue_meta::EditMeta,
 }
 
 #[derive(Args)]
@@ -72,6 +80,30 @@ struct ListArgs {
     /// Maximum number of issues to show
     #[arg(short = 'L', long, default_value = "30")]
     limit: i64,
+
+    /// Filter by label (all must match)
+    #[arg(short, long, value_delimiter = ',')]
+    label: Vec<String>,
+
+    /// Filter by milestone name or ID
+    #[arg(short, long)]
+    milestone: Option<String>,
+
+    /// Filter by assignee ("@me" for yourself)
+    #[arg(short, long)]
+    assignee: Option<String>,
+
+    /// Filter by author ("@me" for yourself)
+    #[arg(short = 'A', long)]
+    author: Option<String>,
+
+    /// Filter by mention ("@me" for yourself)
+    #[arg(long)]
+    mention: Option<String>,
+
+    /// Search issues with a keyword query
+    #[arg(short = 'S', long)]
+    search: Option<String>,
 
     #[command(flatten)]
     json: crate::json::JsonArgs,
@@ -104,13 +136,17 @@ struct CreateArgs {
     #[arg(short = 'F', long)]
     body_file: Option<String>,
 
-    /// Labels (comma-separated names — looked up by name)
-    #[arg(short, long)]
+    /// Add labels by name
+    #[arg(short, long, value_delimiter = ',')]
     label: Vec<String>,
 
-    /// Assignees (comma-separated usernames)
-    #[arg(short, long)]
+    /// Assign people by their login. Use "@me" to self-assign.
+    #[arg(short, long, value_delimiter = ',')]
     assignee: Vec<String>,
+
+    /// Add the issue to a milestone by name
+    #[arg(short, long)]
+    milestone: Option<String>,
 }
 
 #[derive(Args)]
@@ -254,10 +290,47 @@ async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
         other => eyre::bail!("Invalid state: {other}. Use open, closed, or all"),
     }
 
+    // Gitea ignores label names it doesn't know (so they'd filter nothing);
+    // gh matches no issues then.
+    let labels = match crate::issue_meta::filter_label_ids(&api, owner, repo, &args.label).await? {
+        Some(_) if args.label.is_empty() => None,
+        Some(_) => Some(args.label.join(",")),
+        None => {
+            if let Some(json) = json {
+                return json.write_list(&[]);
+            }
+            eprintln!("No issues found");
+            return Ok(());
+        }
+    };
+    let milestone = match args.milestone {
+        Some(ref m) if m.parse::<i64>().is_ok() => Some(m.clone()),
+        Some(ref m) => Some(
+            crate::issue_meta::find_milestone_id(&api, owner, repo, m)
+                .await?
+                .ok_or_else(|| eyre::eyre!("no milestone found with title '{m}'"))?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let mut people = Vec::new();
+    for login in [&args.assignee, &args.author, &args.mention] {
+        people.push(match login {
+            Some(l) => crate::issue_meta::resolve_logins(&api, std::slice::from_ref(l))
+                .await?
+                .pop(),
+            None => None,
+        });
+    }
+    let (assignee, author, mention) = (people[0].clone(), people[1].clone(), people[2].clone());
+
     let state_str = args.state.clone();
     let issues = paginate::paginate(args.limit, 50, |page, per_page| {
         let api = &api;
         let state_str = &state_str;
+        let (labels, milestone) = (labels.clone(), milestone.clone());
+        let (assignee, author, mention) = (assignee.clone(), author.clone(), mention.clone());
+        let search = args.search.clone();
         async move {
             let mut req = api
                 .issue_list_issues()
@@ -272,6 +345,24 @@ async fn list_issues(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> 
             }
             // Gitea's issues endpoint also returns PRs unless told otherwise; gh never lists them.
             req = req.type_(gitea_api::types::IssueListIssuesType::Issues);
+            if let Some(v) = labels {
+                req = req.labels(v);
+            }
+            if let Some(v) = milestone {
+                req = req.milestones(v);
+            }
+            if let Some(v) = assignee {
+                req = req.assigned_by(v);
+            }
+            if let Some(v) = author {
+                req = req.created_by(v);
+            }
+            if let Some(v) = mention {
+                req = req.mentioned_by(v);
+            }
+            if let Some(v) = search {
+                req = req.q(v);
+            }
             Ok(req
                 .send()
                 .await
@@ -507,17 +598,19 @@ async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<(
 
     let input = if let Some(ref title) = args.title {
         // Non-interactive: resolve label names to IDs
-        let label_ids = if args.label.is_empty() {
-            vec![]
-        } else {
-            resolve_label_ids(&api, owner, repo, &args.label).await?
+        let label_ids = crate::issue_meta::label_ids(&api, owner, repo, &args.label).await?;
+        let milestone_id = match args.milestone {
+            Some(ref title) => {
+                Some(crate::issue_meta::milestone_id(&api, owner, repo, title).await?)
+            }
+            None => None,
         };
         IssueInput {
             title: title.clone(),
             body: body_text.unwrap_or_default(),
             label_ids,
-            assignees: args.assignee.clone(),
-            milestone_id: None,
+            assignees: crate::issue_meta::resolve_logins(&api, &args.assignee).await?,
+            milestone_id,
         }
     } else {
         // Interactive
@@ -579,35 +672,6 @@ async fn create_issue(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<(
     }
 
     Ok(())
-}
-
-/// Resolve label names to IDs by fetching labels from the repo.
-async fn resolve_label_ids(
-    api: &gitea_api::Gitea,
-    owner: &str,
-    repo: &str,
-    names: &[String],
-) -> Result<Vec<i64>> {
-    let labels = api
-        .issue_list_labels()
-        .owner(owner)
-        .repo(repo)
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-        .into_inner();
-
-    let mut ids = Vec::new();
-    for name in names {
-        let found = labels
-            .iter()
-            .find(|l| l.name.as_deref() == Some(name.as_str()));
-        match found {
-            Some(l) => ids.push(l.id.unwrap_or(0)),
-            None => eyre::bail!("Label not found: {name}"),
-        }
-    }
-    Ok(ids)
 }
 
 /// Interactive issue creation flow (gh-style).
@@ -790,38 +854,33 @@ async fn comment_issue(repo_args: &repo::RepoArgs, args: &CommentArgs) -> Result
 }
 
 async fn edit_issue(repo_args: &repo::RepoArgs, args: &EditArgs) -> Result<()> {
+    let body = match args.body_file {
+        Some(ref path) => Some(crate::body::read_body_file(path)?),
+        None => args.body.clone(),
+    };
+    if args.title.is_none() && body.is_none() && args.meta.is_empty() {
+        eyre::bail!("field to edit flag required when not running interactively");
+    }
+
     let config = Config::load()?;
     let api = config.client()?;
 
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
-    let mut builder = api
-        .issue_edit_issue()
-        .owner(owner)
-        .repo(repo)
-        .index(args.number);
-
-    if args.title.is_some() || args.body.is_some() {
-        let title = args.title.clone();
-        let body = args.body.clone();
-        builder = builder.body_map(move |mut b| {
-            if let Some(t) = title {
-                b = b.title(t);
-            }
-            if let Some(bd) = body {
-                b = b.body(bd);
-            }
-            b
-        });
+    for &number in &args.numbers {
+        let issue = crate::issue_meta::edit(
+            &api,
+            owner,
+            repo,
+            number,
+            args.title.as_deref(),
+            body.as_deref(),
+            &args.meta,
+        )
+        .await?;
+        println!("{}", issue.html_url.as_deref().unwrap_or_default());
     }
-
-    builder
-        .send()
-        .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
-
-    eprintln!("Issue #{} updated", args.number);
     Ok(())
 }
 

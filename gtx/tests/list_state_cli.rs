@@ -71,6 +71,9 @@ fn list_commands_take_capital_l_for_limit() {
             seen.iter().any(|s| s.contains("limit=5")),
             "{cmd:?}: {seen:?}"
         );
-        server.gtx().args(cmd).args(["-l", "5"]).assert().failure();
+        // `-l` isn't `--limit`; on `issue list` it's gh's `--label`.
+        if cmd[..2] != ["issue", "list"] {
+            server.gtx().args(cmd).args(["-l", "5"]).assert().failure();
+        }
     }
 }

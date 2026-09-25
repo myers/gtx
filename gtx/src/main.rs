@@ -8,6 +8,7 @@ mod browse;
 mod config;
 mod config_cmd;
 mod gpg_key;
+mod issue_meta;
 mod issues;
 mod json;
 mod label;
