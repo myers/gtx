@@ -140,17 +140,45 @@ struct CommentArgs {
 }
 
 #[derive(Args)]
+#[command(group(clap::ArgGroup::new("event").required(true).multiple(false).args(["approve", "request_changes", "comment"])))]
 struct ReviewArgs {
-    /// PR number
-    number: i64,
+    /// PR number (default: the open PR for the current branch)
+    number: Option<i64>,
 
-    /// Review action: approve, request-changes, comment
-    #[arg(short, long, default_value = "approve")]
-    action: String,
+    /// Approve pull request
+    #[arg(short, long)]
+    approve: bool,
 
-    /// Review body/comment
-    #[arg(short, long, default_value = "")]
-    body: String,
+    /// Request changes on a pull request
+    #[arg(short, long)]
+    request_changes: bool,
+
+    /// Comment on a pull request
+    #[arg(short, long)]
+    comment: bool,
+
+    /// Specify the body of a review
+    #[arg(short, long, conflicts_with = "body_file")]
+    body: Option<String>,
+
+    /// Read body text from file (use "-" to read from standard input)
+    #[arg(short = 'F', long, value_name = "FILE")]
+    body_file: Option<String>,
+
+    /// Add line comments from a JSON file (use "-" to read from standard input)
+    #[arg(
+        long,
+        value_name = "FILE",
+        long_help = "Add line comments from a JSON file (use \"-\" to read from standard input).\n\n\
+The file holds the array Gitea takes as `comments` on POST .../pulls/NUMBER/reviews:\n\n  \
+[{\"path\": \"src/main.rs\", \"body\": \"typo\", \"new_position\": 12},\n   \
+{\"path\": \"README.md\", \"body\": \"why remove this?\", \"old_position\": 7}]\n\n\
+Positions are file line numbers, not diff positions: `new_position` is a line \
+of the file as the PR changes it (an added or unchanged line), `old_position` \
+a line of the file before the change (a removed line). Give exactly one per comment. \
+Gitea also accepts lines outside the diff's hunks."
+    )]
+    comments_file: Option<String>,
 }
 
 #[derive(Args)]
@@ -613,23 +641,7 @@ async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
             .await?;
         }
         if json.wants("reviews") || json.wants("latestReviews") {
-            view.reviews = paginate::paginate(10_000, 50, |page, limit| {
-                let api = &api;
-                async move {
-                    Ok(api
-                        .repo_list_pull_reviews()
-                        .owner(owner)
-                        .repo(repo)
-                        .index(n)
-                        .page(page)
-                        .limit(limit)
-                        .send()
-                        .await
-                        .map_err(api_err)?
-                        .into_inner())
-                }
-            })
-            .await?;
+            view.reviews = fetch_reviews(&api, owner, repo, n).await?;
         }
         return json.write_one(&view);
     }
@@ -709,7 +721,7 @@ async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
         println!("{url}");
     }
 
-    // Comments
+    // Comments and reviews, in time order, as `gh pr view --comments` shows them
     if args.comments {
         let comments = api
             .issue_get_comments()
@@ -720,25 +732,76 @@ async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
             .await
             .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
             .into_inner();
+        let reviews = fetch_reviews(&api, owner, repo, args.number).await?;
+        let mut entries: Vec<(Option<chrono::DateTime<chrono::Utc>>, String)> = Vec::new();
+        for c in &comments {
+            let author = c
+                .user
+                .as_ref()
+                .and_then(|u| u.login.as_deref())
+                .unwrap_or("unknown");
+            let when = c.created_at.map(relative_time).unwrap_or_default();
+            let body = c.body.as_deref().unwrap_or("");
+            entries.push((c.created_at, format!("{author} ({when}):\n{body}")));
+        }
+        let mut n_reviews = 0;
+        for r in submitted_reviews(&reviews) {
+            n_reviews += 1;
+            let author = r
+                .user
+                .as_ref()
+                .and_then(|u| u.login.as_deref())
+                .unwrap_or("unknown");
+            let verb = match gh_review_state(r) {
+                Some("APPROVED") => "approved",
+                Some("CHANGES_REQUESTED") => "requested changes",
+                Some("DISMISSED") => "reviewed (dismissed)",
+                Some("PENDING") => "started a review",
+                _ => "commented",
+            };
+            let when = r.submitted_at.map(relative_time).unwrap_or_default();
+            let mut text = format!("{author} {verb} ({when}):");
+            if let Some(body) = r.body.as_deref().filter(|b| !b.is_empty()) {
+                text.push_str(&format!("\n{body}"));
+            }
+            if let (Some(id), true) = (r.id, r.comments_count.unwrap_or(0) > 0) {
+                let line_comments = api
+                    .repo_get_pull_review_comments()
+                    .owner(owner)
+                    .repo(repo)
+                    .index(args.number)
+                    .id(id)
+                    .send()
+                    .await
+                    .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+                    .into_inner();
+                for lc in &line_comments {
+                    text.push_str(&format!("\n\n  {}", review_comment_location(lc)));
+                    for line in lc.body.as_deref().unwrap_or("").lines() {
+                        text.push_str(&format!("\n  {line}"));
+                    }
+                }
+            }
+            entries.push((r.submitted_at, text));
+        }
+        // Stable sort: equal (or missing) times keep comments-then-reviews order.
+        entries.sort_by_key(|(t, _)| *t);
 
-        if comments.is_empty() {
+        if entries.is_empty() {
             println!("\nNo comments.");
         } else {
-            println!(
-                "\n--- {} comment{} ---",
-                comments.len(),
-                if comments.len() == 1 { "" } else { "s" }
-            );
-            for c in &comments {
-                let author = c
-                    .user
-                    .as_ref()
-                    .and_then(|u| u.login.as_deref())
-                    .unwrap_or("unknown");
-                let when = c.created_at.map(|dt| relative_time(dt)).unwrap_or_default();
-                let body = c.body.as_deref().unwrap_or("");
-                println!("\n{author} ({when}):");
-                println!("{body}");
+            let plural =
+                |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+            let mut counts = Vec::new();
+            if !comments.is_empty() {
+                counts.push(plural(comments.len(), "comment"));
+            }
+            if n_reviews > 0 {
+                counts.push(plural(n_reviews, "review"));
+            }
+            println!("\n--- {} ---", counts.join(", "));
+            for (_, text) in &entries {
+                println!("\n{text}");
             }
         }
     } else {
@@ -756,7 +819,7 @@ async fn view_pr(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
 
 fn detect_current_branch() -> Result<String> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .output()
         .map_err(|_| eyre::eyre!("Failed to detect current branch"))?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -987,33 +1050,176 @@ async fn comment_pr(repo_args: &repo::RepoArgs, args: &CommentArgs) -> Result<()
 }
 
 async fn review_pr(repo_args: &repo::RepoArgs, args: &ReviewArgs) -> Result<()> {
+    use gitea_api::types::ReviewStateType as S;
+    if args.body_file.as_deref() == Some("-") && args.comments_file.as_deref() == Some("-") {
+        eyre::bail!("--body-file and --comments-file can't both read standard input");
+    }
+    let body = match &args.body_file {
+        Some(path) => crate::body::read_body_file(path)?,
+        None => args.body.clone().unwrap_or_default(),
+    };
+    let comments = match &args.comments_file {
+        Some(path) => {
+            let text = crate::body::read_body_file(path)?;
+            parse_review_comments(&text).map_err(|e| eyre::eyre!("comments file {path}: {e}"))?
+        }
+        None => Vec::new(),
+    };
+    let (event, name) = if args.approve {
+        (S::Approved, "approve")
+    } else if args.request_changes {
+        (S::RequestChanges, "request-changes")
+    } else {
+        (S::Comment, "comment")
+    };
+    if event != S::Approved && body.trim().is_empty() && comments.is_empty() {
+        eyre::bail!("body cannot be blank for {name} review");
+    }
+
     let config = Config::load()?;
     let api = config.client()?;
-
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
-
-    let event = match args.action.as_str() {
-        "approve" => gitea_api::types::ReviewStateType::Approved,
-        "request-changes" | "request_changes" => gitea_api::types::ReviewStateType::RequestChanges,
-        "comment" => gitea_api::types::ReviewStateType::Comment,
-        other => {
-            eyre::bail!("Invalid review action: {other}. Use approve, request-changes, or comment")
-        }
+    let number = match args.number {
+        Some(n) => n,
+        None => current_branch_pr(&api, owner, repo).await?,
     };
 
-    let action_str = args.action.clone();
     api.repo_create_pull_review()
         .owner(owner)
         .repo(repo)
-        .index(args.number)
-        .body_map(move |b| b.body(args.body.clone()).event(event.clone()))
+        .index(number)
+        .body_map(move |b| b.body(body).event(event).comments(comments))
         .send()
         .await
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
 
-    eprintln!("Review submitted on PR #{}: {action_str}", args.number);
+    let done = match name {
+        "approve" => "Approved",
+        "request-changes" => "Requested changes to",
+        _ => "Reviewed",
+    };
+    eprintln!("{done} pull request {owner}/{repo}#{number}");
     Ok(())
+}
+
+/// All of a PR's reviews, review-request placeholders included.
+async fn fetch_reviews(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    n: i64,
+) -> Result<Vec<PullReview>> {
+    paginate::paginate(10_000, 50, |page, limit| async move {
+        Ok(api
+            .repo_list_pull_reviews()
+            .owner(owner)
+            .repo(repo)
+            .index(n)
+            .page(page)
+            .limit(limit)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner())
+    })
+    .await
+}
+
+/// `path:line` of a line comment; Gitea's `position` is the line in the new
+/// file, `original_position` the line in the old one (for removed lines).
+fn review_comment_location(c: &gitea_api::types::PullReviewComment) -> String {
+    let path = c.path.as_deref().unwrap_or("");
+    match (c.position.unwrap_or(0), c.original_position.unwrap_or(0)) {
+        (0, 0) => path.to_string(),
+        (0, old) => format!("{path}:{old} (old)"),
+        (new, _) => format!("{path}:{new}"),
+    }
+}
+
+/// The open PR whose head is the current git branch, as gh finds it.
+async fn current_branch_pr(api: &gitea_api::Gitea, owner: &str, repo: &str) -> Result<i64> {
+    let branch = detect_current_branch()?;
+    if branch.is_empty() {
+        eyre::bail!("could not determine the current branch; give a PR number");
+    }
+    let prs = paginate::paginate(10_000, 50, |page, limit| async move {
+        Ok(api
+            .repo_list_pull_requests()
+            .owner(owner)
+            .repo(repo)
+            .state(gitea_api::types::RepoListPullRequestsState::Open)
+            .page(page as u64)
+            .limit(limit)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+            .into_inner())
+    })
+    .await?;
+    prs.iter()
+        .find(|p| pr_head(p).and_then(|h| h.ref_.as_deref()) == Some(branch.as_str()))
+        .and_then(|p| p.number)
+        .ok_or_else(|| eyre::eyre!("no pull requests found for branch \"{branch}\""))
+}
+
+/// Parse and check a `--comments-file`: a JSON array of Gitea's
+/// `CreatePullReviewComment` (`path`, `body`, `new_position` | `old_position`).
+fn parse_review_comments(
+    text: &str,
+) -> Result<Vec<gitea_api::types::CreatePullReviewComment>, String> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let items = v.as_array().ok_or(
+        "expected a JSON array of {\"path\", \"body\", \"new_position\" | \"old_position\"}",
+    )?;
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let err = |m: String| format!("comments[{i}]: {m}");
+            let obj = item
+                .as_object()
+                .ok_or_else(|| err("expected an object".into()))?;
+            if let Some(k) = obj
+                .keys()
+                .find(|k| !["path", "body", "new_position", "old_position"].contains(&k.as_str()))
+            {
+                return Err(err(format!(
+                    "unknown key \"{k}\" (expected path, body, new_position, old_position)"
+                )));
+            }
+            let text = |k: &str| match obj.get(k) {
+                Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
+                _ => Err(err(format!("missing \"{k}\" (a non-empty string)"))),
+            };
+            let line = |k: &str| match obj.get(k) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(n) => match n.as_i64() {
+                    Some(n) if n >= 1 => Ok(Some(n)),
+                    _ => Err(err(format!(
+                        "\"{k}\" must be a line number (an integer >= 1), got {n}"
+                    ))),
+                },
+            };
+            let (path, body) = (text("path")?, text("body")?);
+            let (new_position, old_position) = (line("new_position")?, line("old_position")?);
+            match (new_position, old_position) {
+                (None, None) => Err(err(
+                    "needs \"new_position\" or \"old_position\" (a line number in the new or old file)"
+                        .into(),
+                )),
+                (Some(_), Some(_)) => Err(err(
+                    "give only one of \"new_position\" and \"old_position\"".into(),
+                )),
+                _ => Ok(gitea_api::types::CreatePullReviewComment {
+                    path: Some(path),
+                    body: Some(body),
+                    new_position,
+                    old_position,
+                }),
+            }
+        })
+        .collect()
 }
 
 async fn checks_pr(repo_args: &repo::RepoArgs, args: &ChecksArgs) -> Result<()> {

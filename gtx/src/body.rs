@@ -2,8 +2,13 @@ use std::path::Path;
 
 use eyre::Result;
 
-/// Read a body from a file path, optionally resolving local file references.
+/// Read a body from a file path, or from stdin when `path` is `-` (as gh does).
 pub fn read_body_file(path: &str) -> Result<String> {
+    if path == "-" {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+        return Ok(s);
+    }
     let p = Path::new(path);
     if !p.exists() {
         eyre::bail!("File not found: {path}");
