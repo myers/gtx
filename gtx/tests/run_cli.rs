@@ -389,3 +389,177 @@ fn run_view_jobs_unset_times_are_go_zero_time() {
              0001-01-01T00:00:00Z 0001-01-01T00:00:00Z\n",
         );
 }
+
+/// A pull_request run as Gitea sends it: no `head_branch`, `path` on the PR
+/// ref, the PR's head branch only under `pull_requests[0].head.ref`.
+const PR_RUN: &str = r#"{"id":281,"status":"completed","conclusion":"failure",
+    "display_title":"PR change","event":"pull_request","head_branch":null,
+    "path":"walk.yml@refs/pull/13/head",
+    "pull_requests":[{"id":6,"number":13,"url":"u",
+        "head":{"ref":"feature","sha":"77f3","repo":{"id":5,"url":"u","name":"r"}},
+        "base":{"ref":"main","sha":"8d4b","repo":{"id":5,"url":"u","name":"r"}}}]}"#;
+
+/// gh's headBranch for a pull_request run is the PR's head branch.
+#[test]
+fn pull_request_run_branch_is_the_prs_head_branch() {
+    let server = FakeGitea::start(|target| {
+        if target.starts_with("/api/v1/repos/o/r/actions/runs?") {
+            format!(r#"{{"total_count":1,"workflow_runs":[{PR_RUN}]}}"#)
+        } else if target.starts_with("/api/v1/repos/o/r/actions/runs/281/jobs") {
+            r#"{"total_count":0,"jobs":[]}"#.into()
+        } else {
+            PR_RUN.into()
+        }
+    });
+
+    server
+        .gtx()
+        .args(["run", "list", "-R", "o/r", "--json", "headBranch"])
+        .assert()
+        .success()
+        .stdout("[{\"headBranch\":\"feature\"}]\n");
+    server
+        .gtx()
+        .args(["run", "list", "-R", "o/r"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feature"));
+    server
+        .gtx()
+        .args(["run", "view", "281", "-R", "o/r"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Branch: feature\n"));
+    server
+        .gtx()
+        .args(["run", "view", "281", "-R", "o/r", "--json", "headBranch"])
+        .assert()
+        .success()
+        .stdout("{\"headBranch\":\"feature\"}\n");
+}
+
+fn run_with_branch(id: i64, branch: &str) -> String {
+    format!(
+        r#"{{"id":{id},"status":"completed","display_title":"t","event":"push",
+            "head_branch":"{branch}","path":"ci.yml@refs/heads/{branch}"}}"#
+    )
+}
+
+fn pr_run(id: i64, head: &str) -> String {
+    format!(
+        r#"{{"id":{id},"status":"completed","display_title":"t","event":"pull_request",
+            "path":"ci.yml@refs/pull/{id}/head","pull_requests":[{{"number":{id},
+            "head":{{"ref":"{head}"}},"base":{{"ref":"main"}}}}]}}"#
+    )
+}
+
+fn page(runs: &[String]) -> String {
+    format!(
+        r#"{{"total_count":{},"workflow_runs":[{}]}}"#,
+        runs.len(),
+        runs.join(",")
+    )
+}
+
+/// Gitea's `branch` query matches `refs/heads/<branch>` only, never a
+/// pull_request run's `refs/pull/N/head`, so `-b` also pages through
+/// pull_request runs and matches their PR head branch client side, merging
+/// both newest first.
+#[test]
+fn run_list_branch_finds_pull_request_runs() {
+    let server = FakeGitea::start(|target| {
+        let q = target.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let param = |k: &str| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix(k)?.strip_prefix('='))
+                .and_then(|v| v.parse::<usize>().ok())
+        };
+        let (page_no, limit) = (param("page").unwrap_or(1), param("limit").unwrap_or(50));
+        let all = if q.contains("branch=feature") {
+            // Server-side branch match: push runs on the branch only.
+            vec![
+                run_with_branch(10, "feature"),
+                run_with_branch(6, "feature"),
+            ]
+        } else if q.contains("event=pull_request") {
+            // Every pull_request run, whatever its branch: the matches
+            // span several pages.
+            vec![
+                pr_run(9, "other"),
+                pr_run(8, "feature"),
+                pr_run(7, "feature"),
+                pr_run(5, "other"),
+                pr_run(4, "other"),
+                pr_run(3, "other"),
+                pr_run(2, "feature"),
+                pr_run(1, "feature"),
+            ]
+        } else {
+            vec![]
+        };
+        let start = ((page_no - 1) * limit).min(all.len());
+        page(&all[start..(start + limit).min(all.len())])
+    });
+
+    server
+        .gtx()
+        .args([
+            "run",
+            "list",
+            "-R",
+            "o/r",
+            "-b",
+            "feature",
+            "-L",
+            "4",
+            "--json",
+            "databaseId,headBranch",
+            "--jq",
+            ".[] | \"\\(.databaseId) \\(.headBranch)\"",
+        ])
+        .assert()
+        .success()
+        .stdout("10 feature\n8 feature\n7 feature\n6 feature\n");
+
+    // Paging continues past pages with no match until the limit is met.
+    server
+        .gtx()
+        .args([
+            "run",
+            "list",
+            "-R",
+            "o/r",
+            "-b",
+            "feature",
+            "-L",
+            "6",
+            "--json",
+            "databaseId",
+            "--jq",
+            ".[].databaseId",
+        ])
+        .assert()
+        .success()
+        .stdout("10\n8\n7\n6\n2\n1\n");
+
+    // An event that can't be a pull_request run keeps the single server query.
+    let before = server.seen().len();
+    server
+        .gtx()
+        .args([
+            "run",
+            "list",
+            "-R",
+            "o/r",
+            "-b",
+            "feature",
+            "-e",
+            "push",
+            "--json",
+            "databaseId",
+        ])
+        .assert()
+        .success();
+    let seen = server.seen();
+    assert_eq!(seen.len() - before, 1, "{:?}", &seen[before..]);
+}

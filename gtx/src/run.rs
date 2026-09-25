@@ -192,7 +192,7 @@ const RUN_STATUSES: &[&str] = &[
 ];
 
 /// Server-side filters for the workflow-run list endpoint.
-#[derive(Args, Default)]
+#[derive(Args, Clone, Default)]
 struct RunFilterArgs {
     /// Filter runs by the full SHA of the commit that triggered them
     #[arg(short = 'c', long, value_name = "SHA")]
@@ -302,6 +302,16 @@ fn run_workflow_name(run: &ActionWorkflowRun) -> Option<&str> {
     Some(file.rsplit('/').next().unwrap_or(file))
 }
 
+/// A run's branch as gh reports it. Gitea leaves `head_branch` unset on
+/// pull_request runs (their ref is `refs/pull/N/head`); gh's is the PR's
+/// head branch, which Gitea sends as `pull_requests[0].head.ref`.
+fn run_branch(run: &ActionWorkflowRun) -> Option<&str> {
+    run.head_branch
+        .as_deref()
+        .filter(|b| !b.is_empty())
+        .or_else(|| run.pull_requests.first()?.head.as_ref()?.ref_.as_deref())
+}
+
 /// A run/job/step time, or `None` when Gitea reports it unset: the Unix
 /// epoch (e.g. `started_at` of a queued run) or Go's zero time.
 fn set_time(t: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
@@ -328,7 +338,7 @@ macro_rules! run_fields {
     field("databaseId", |r| gh::v(r.id)),
     field("displayTitle", |r| gh::v(&r.display_title)),
     field("event", |r| gh::v(&r.event)),
-    field("headBranch", |r| gh::v(&r.head_branch)),
+    field("headBranch", |r| gh::v(run_branch(r))),
     field("headSha", |r| gh::v(&r.head_sha)),
     field("name", |r| gh::v(run_workflow_name(r))),
     field("number", |r| gh::v(r.run_number)),
@@ -451,25 +461,65 @@ async fn fetch_runs(
     Ok(runs)
 }
 
+/// [`fetch_runs`] for `--branch`. Gitea's `branch` query matches only
+/// `refs/heads/<branch>`, never a pull_request run's `refs/pull/N/head`, so
+/// unless `--event` rules them out, also page through pull_request runs
+/// (unfiltered by branch) keeping those whose PR head branch is `branch`.
+/// Both lists come newest first; merge them by ID and keep the newest
+/// `limit`, which lie within the first `limit` of each.
+async fn fetch_branch_runs(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    filter: &RunFilterArgs,
+    branch: &str,
+    limit: i64,
+    keep: impl Fn(&ActionWorkflowRun) -> bool,
+) -> Result<Vec<ActionWorkflowRun>> {
+    let mut runs = fetch_runs(api, owner, repo, filter, limit, &keep).await?;
+    let pr_event = match filter.event.as_deref() {
+        None => Some("pull_request"),
+        Some(e) if e.starts_with("pull_request") => Some(e),
+        Some(_) => None,
+    };
+    if let Some(event) = pr_event {
+        let pr_filter = RunFilterArgs {
+            branch: None,
+            event: Some(event.to_string()),
+            ..filter.clone()
+        };
+        let pr_runs = fetch_runs(api, owner, repo, &pr_filter, limit, |r| {
+            r.head_branch.as_deref().is_none_or(str::is_empty)
+                && run_branch(r) == Some(branch)
+                && keep(r)
+        })
+        .await?;
+        runs.extend(pr_runs);
+        runs.sort_by_key(|r| std::cmp::Reverse(r.id));
+        runs.dedup_by_key(|r| r.id);
+        runs.truncate(limit.max(0) as usize);
+    }
+    Ok(runs)
+}
+
 async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     let json = args.json.select(RUN_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
 
-    let runs = fetch_runs(
-        &api,
-        &repo_info.owner,
-        &repo_info.name,
-        &args.filter,
-        args.limit,
-        |run| {
-            args.workflow
-                .as_deref()
-                .is_none_or(|w| run_matches_workflow(run, w))
-        },
-    )
-    .await?;
+    let keep = |run: &ActionWorkflowRun| {
+        args.workflow
+            .as_deref()
+            .is_none_or(|w| run_matches_workflow(run, w))
+    };
+    let (owner, name) = (repo_info.owner.as_str(), repo_info.name.as_str());
+    let runs = match &args.filter.branch {
+        Some(branch) => {
+            fetch_branch_runs(&api, owner, name, &args.filter, branch, args.limit, keep).await?
+        }
+        None => fetch_runs(&api, owner, name, &args.filter, args.limit, keep).await?,
+    };
 
     if let Some(json) = json {
         return json.write_list(&runs);
@@ -497,7 +547,7 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
             title.to_string()
         };
         let status = run.status.as_deref().unwrap_or("");
-        let branch = run.head_branch.as_deref().unwrap_or("");
+        let branch = run_branch(run).unwrap_or("");
         let age = set_time(run.created_at)
             .map(relative_time)
             .unwrap_or_default();
@@ -548,7 +598,7 @@ async fn view_run(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let id = run.id.unwrap_or(0);
     let status = run.status.as_deref().unwrap_or("unknown");
     let conclusion = run.conclusion.as_deref().unwrap_or("");
-    let branch = run.head_branch.as_deref().unwrap_or("");
+    let branch = run_branch(&run).unwrap_or("");
     let event = run.event.as_deref().unwrap_or("");
 
     println!("{title} (#{id})");
@@ -593,7 +643,7 @@ fn format_run_picker_label(run: &gitea_api::types::ActionWorkflowRun) -> String 
     let status = run.status.as_deref().unwrap_or("");
     let conclusion = run.conclusion.as_deref().unwrap_or("");
     let icon = job_icon(status, conclusion);
-    let branch = run.head_branch.as_deref().unwrap_or("");
+    let branch = run_branch(run).unwrap_or("");
     let title = run.display_title.as_deref().unwrap_or("(unnamed)");
     format!("{icon} #{id} {branch} {title}")
 }
@@ -1100,5 +1150,15 @@ mod tests {
 
         assert!(in_progress.is_empty());
         assert_eq!(recent.len(), 1);
+    }
+
+    #[test]
+    fn picker_label_shows_pull_request_head_branch() {
+        let run: gitea_api::types::ActionWorkflowRun = serde_json::from_str(
+            r#"{"id":281,"status":"completed","conclusion":"failure","display_title":"t",
+                "event":"pull_request","pull_requests":[{"head":{"ref":"feature"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(format_run_picker_label(&run), "✗ #281 feature t");
     }
 }

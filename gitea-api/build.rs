@@ -74,15 +74,50 @@ fn accept_any_2xx(spec: &mut Value) {
 }
 
 /// Fields the server sends that its swagger omits: Gitea's
-/// `ActionWorkflowRun` has `created_at`/`updated_at` (#30).
+/// `ActionWorkflowRun` has `created_at`/`updated_at` (#30) and, for
+/// pull_request runs, `pull_requests` (#31): a slim `{id, number, url, head,
+/// base}` per PR, where `head`/`base` are `{ref, sha, repo}` with a
+/// `{id, url, name}` repo, so not the spec's full `PullRequest`.
 fn add_missing_fields(spec: &mut Value) {
-    const MISSING: &[(&str, &[&str])] = &[("ActionWorkflowRun", &["created_at", "updated_at"])];
-    for (schema, fields) in MISSING {
-        let props = &mut spec["components"]["schemas"][schema]["properties"];
+    let schemas = &mut spec["components"]["schemas"];
+    let branch = json!({ "type": "string" });
+    schemas["ActionWorkflowRunPullRequestBranch"] = json!({
+        "type": "object",
+        "properties": { "ref": branch, "sha": { "type": "string" } },
+    });
+    let pr_branch = json!({ "$ref": "#/components/schemas/ActionWorkflowRunPullRequestBranch" });
+    schemas["ActionWorkflowRunPullRequest"] = json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "integer", "format": "int64" },
+            "number": { "type": "integer", "format": "int64" },
+            "url": { "type": "string" },
+            "head": pr_branch,
+            "base": pr_branch,
+        },
+    });
+
+    let time = json!({ "type": "string", "format": "date-time" });
+    let missing: &[(&str, &[(&str, Value)])] = &[(
+        "ActionWorkflowRun",
+        &[
+            ("created_at", time.clone()),
+            ("updated_at", time),
+            (
+                "pull_requests",
+                json!({
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/ActionWorkflowRunPullRequest" },
+                }),
+            ),
+        ],
+    )];
+    for (schema, fields) in missing {
+        let props = &mut schemas[schema]["properties"];
         assert!(props.is_object(), "schema {schema} has no properties");
-        for field in *fields {
+        for (field, ty) in *fields {
             if props.get(field).is_none() {
-                props[field] = json!({ "type": "string", "format": "date-time" });
+                props[field] = ty.clone();
             }
         }
     }
