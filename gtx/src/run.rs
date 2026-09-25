@@ -168,6 +168,8 @@ enum RunAction {
     View(ViewArgs),
     /// Rerun a workflow run
     Rerun(RerunArgs),
+    /// Cancel a workflow run
+    Cancel(CancelArgs),
     /// Watch a workflow run (poll until complete, show logs)
     Watch(WatchArgs),
     /// Download artifacts from a workflow run
@@ -234,9 +236,33 @@ struct ListArgs {
 
 #[derive(Args)]
 struct ViewArgs {
-    id: i64,
+    /// Run ID. If omitted (and no --job), prompt to pick a recent run.
+    id: Option<i64>,
+
+    /// View a specific job ID from a run
+    #[arg(short, long, value_name = "JOB_ID")]
+    job: Option<i64>,
+
+    /// View full log for either a run or specific job
+    #[arg(long, conflicts_with = "log_failed")]
+    log: bool,
+
+    /// View the log for any failed steps in a run or specific job
+    #[arg(long)]
+    log_failed: bool,
+
+    /// Exit with non-zero status if run failed
+    #[arg(long)]
+    exit_status: bool,
+
     #[command(flatten)]
     json: crate::json::JsonArgs,
+}
+
+#[derive(Args)]
+struct CancelArgs {
+    /// Run ID. If omitted, prompt to pick an in-progress run.
+    id: Option<i64>,
 }
 
 #[derive(Args)]
@@ -290,6 +316,7 @@ impl RunCommand {
             RunAction::List(args) => list_runs(&self.repo, args).await,
             RunAction::View(args) => view_run(&self.repo, args).await,
             RunAction::Rerun(args) => rerun_run(&self.repo, args).await,
+            RunAction::Cancel(args) => cancel_run(&self.repo, args).await,
             RunAction::Watch(args) => watch_run(&self.repo, args).await,
             RunAction::Download(args) => download_artifacts(&self.repo, args).await,
         }
@@ -561,63 +588,431 @@ async fn list_runs(repo_args: &repo::RepoArgs, args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
+fn api_err(e: impl Into<gitea_api::GiteaError>) -> eyre::Report {
+    eyre::eyre!("{}", e.into())
+}
+
 async fn view_run(repo_args: &repo::RepoArgs, args: &ViewArgs) -> Result<()> {
     let json = args.json.select(RUN_VIEW_FIELDS)?;
     let config = Config::load()?;
     let api = config.client()?;
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, name) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    // Like gh, `--job` picks the run: the job's own.
+    let selected_job = match args.job {
+        Some(job_id) => Some(
+            api.get_workflow_job()
+                .owner(owner)
+                .repo(name)
+                .job_id(job_id.to_string())
+                .send()
+                .await
+                .map_err(api_err)?
+                .into_inner(),
+        ),
+        None => None,
+    };
+    let run_id = match (selected_job.as_ref().and_then(|j| j.run_id), args.id) {
+        (Some(id), _) | (None, Some(id)) => id,
+        (None, None) if atty_check() => {
+            pick_run(&api, owner, name, "Select a workflow run", false).await?
+        }
+        (None, None) => eyre::bail!("run or job ID required when not running interactively"),
+    };
 
     let run = api
         .get_workflow_run()
-        .owner(&repo_info.owner)
-        .repo(&repo_info.name)
-        .run(args.id)
+        .owner(owner)
+        .repo(name)
+        .run(run_id)
         .send()
         .await
-        .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
+        .map_err(api_err)?
         .into_inner();
+
+    let fetch_jobs = || async {
+        Ok::<_, eyre::Report>(
+            api.list_workflow_run_jobs()
+                .owner(owner)
+                .repo(name)
+                .run(run_id)
+                .send()
+                .await
+                .map_err(api_err)?
+                .into_inner()
+                .jobs,
+        )
+    };
 
     if let Some(json) = json {
         let jobs = if json.wants("jobs") {
-            api.list_workflow_run_jobs()
-                .owner(&repo_info.owner)
-                .repo(&repo_info.name)
-                .run(args.id)
-                .send()
-                .await
-                .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
-                .into_inner()
-                .jobs
+            fetch_jobs().await?
         } else {
             Vec::new()
         };
         return json.write_one(&RunView { run, jobs });
     }
 
-    let title = run.display_title.as_deref().unwrap_or("(unnamed)");
-    let id = run.id.unwrap_or(0);
-    let status = run.status.as_deref().unwrap_or("unknown");
-    let conclusion = run.conclusion.as_deref().unwrap_or("");
-    let branch = run_branch(&run).unwrap_or("");
-    let event = run.event.as_deref().unwrap_or("");
-
-    println!("{title} (#{id})");
-    println!(
-        "Status: {status}{}",
-        if conclusion.is_empty() {
-            String::new()
-        } else {
-            format!(" ({conclusion})")
-        }
-    );
-    println!("Branch: {branch}");
-    println!("Event: {event}");
-
-    if let Some(ref url) = run.html_url {
-        println!();
-        println!("{url}");
+    if args.log || args.log_failed {
+        let jobs = match selected_job {
+            Some(job) => {
+                if !is_terminal_status(job.status.as_deref().unwrap_or("")) {
+                    eyre::bail!(
+                        "job {} is still in progress; logs will be available when it is complete",
+                        job.id.unwrap_or(0)
+                    );
+                }
+                vec![job]
+            }
+            None => {
+                if !is_terminal_status(run.status.as_deref().unwrap_or("")) {
+                    eyre::bail!(
+                        "run {run_id} is still in progress; logs will be available when it is complete"
+                    );
+                }
+                fetch_jobs().await?
+            }
+        };
+        return print_run_log(&api, owner, name, &jobs, args.log_failed).await;
     }
 
+    let jobs = match &selected_job {
+        Some(job) => vec![job.clone()],
+        None => fetch_jobs().await?,
+    };
+    let artifacts = if selected_job.is_none() {
+        let resp = api
+            .raw_get(&format!(
+                "repos/{owner}/{name}/actions/runs/{run_id}/artifacts"
+            ))
+            .await
+            .map_err(|e| eyre::eyre!("{e}"))?;
+        let data: serde_json::Value = serde_json::from_str(&resp)?;
+        data["artifacts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|a| {
+                let name = a["name"].as_str().unwrap_or("").to_string();
+                (name, a["expired"].as_bool() == Some(true))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // gh's `-v` is gtx's global `-v`/`--verbose` (which also turns on HTTP
+    // transcripts on stderr).
+    let verbose = gitea_api::verbose::config().is_some_and(|c| c.is_on());
+    let view = TextView {
+        run: &run,
+        jobs: &jobs,
+        selected_job: selected_job.as_ref(),
+        artifacts: &artifacts,
+        verbose,
+    };
+    print!("{}", view.render());
+
+    let failed = match &selected_job {
+        Some(job) => is_failure_conclusion(outcome(&job.status, &job.conclusion).1),
+        None => is_failure_conclusion(outcome(&run.status, &run.conclusion).1),
+    };
+    if args.exit_status && failed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Whether a run/job/step is completed, and its conclusion. Gitea may report
+/// an outcome (`success`, `failure`, ...) as the status itself.
+fn outcome<'a>(status: &'a Option<String>, conclusion: &'a Option<String>) -> (bool, &'a str) {
+    let status = status.as_deref().unwrap_or("");
+    let conclusion = conclusion.as_deref().unwrap_or("");
+    let completed = is_terminal_status(status);
+    match (completed, conclusion, status) {
+        (true, "", "completed") => (true, ""),
+        (true, "", s) => (true, s),
+        (c, conc, _) => (c, conc),
+    }
+}
+
+/// gh's status symbol: ✓ success, - skipped/neutral, X other completed
+/// outcomes, * not yet completed.
+fn gh_symbol(status: &Option<String>, conclusion: &Option<String>) -> &'static str {
+    match outcome(status, conclusion) {
+        (false, _) => "*",
+        (true, "success") => "✓",
+        (true, "skipped" | "neutral") => "-",
+        (true, _) => "X",
+    }
+}
+
+/// A duration in whole seconds as Go's `time.Duration` prints it (`1m3s`).
+fn go_duration(secs: i64) -> String {
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    match (h, m) {
+        (0, 0) => format!("{s}s"),
+        (0, _) => format!("{m}m{s}s"),
+        _ => format!("{h}h{m}m{s}s"),
+    }
+}
+
+/// gh's text `run view`.
+struct TextView<'a> {
+    run: &'a ActionWorkflowRun,
+    jobs: &'a [gitea_api::types::ActionWorkflowJob],
+    selected_job: Option<&'a gitea_api::types::ActionWorkflowJob>,
+    /// `(name, expired)`
+    artifacts: &'a [(String, bool)],
+    verbose: bool,
+}
+
+impl TextView<'_> {
+    fn render(&self) -> String {
+        use std::fmt::Write;
+        let run = self.run;
+        let id = run.id.unwrap_or(0);
+        let url = run.html_url.as_deref().unwrap_or("");
+        let mut out = String::new();
+
+        let pr = match run.pull_requests.first().and_then(|p| p.number) {
+            Some(n) => format!(" #{n}"),
+            None => String::new(),
+        };
+        let _ = writeln!(
+            out,
+            "\n{} {} {}{pr} · {id}",
+            gh_symbol(&run.status, &run.conclusion),
+            run_branch(run).unwrap_or(""),
+            run_workflow_name(run).unwrap_or(""),
+        );
+        let ago = set_time(run.started_at)
+            .or(set_time(run.created_at))
+            .map(relative_time)
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "Triggered via {} {ago}\n",
+            run.event.as_deref().unwrap_or("")
+        );
+
+        let (_, conclusion) = outcome(&run.status, &run.conclusion);
+        if self.jobs.is_empty() && matches!(conclusion, "failure" | "startup_failure") {
+            let _ = writeln!(
+                out,
+                "X This run likely failed because of a workflow file issue.\n"
+            );
+            let _ = writeln!(out, "For more information, see: {url}");
+            return out;
+        }
+
+        match self.selected_job {
+            None => {
+                out.push_str("JOBS\n");
+                out.push_str(&render_jobs(self.jobs, self.verbose));
+            }
+            Some(job) => out.push_str(&render_jobs(std::slice::from_ref(job), true)),
+        }
+
+        match self.selected_job {
+            None => {
+                if !self.artifacts.is_empty() {
+                    out.push_str("\nARTIFACTS\n");
+                    for (name, expired) in self.artifacts {
+                        let badge = if *expired { " (expired)" } else { "" };
+                        let _ = writeln!(out, "{name}{badge}");
+                    }
+                }
+                out.push('\n');
+                if is_failure_conclusion(conclusion) {
+                    let _ = writeln!(
+                        out,
+                        "To see what failed, try: gtx run view {id} --log-failed"
+                    );
+                } else if let [job] = self.jobs {
+                    let _ = writeln!(
+                        out,
+                        "For more information about the job, try: gtx run view --job={}",
+                        job.id.unwrap_or(0)
+                    );
+                } else {
+                    out.push_str(
+                        "For more information about a job, try: gtx run view --job=<job-id>\n",
+                    );
+                }
+            }
+            Some(job) => {
+                out.push('\n');
+                let job_id = job.id.unwrap_or(0);
+                if is_failure_conclusion(outcome(&job.status, &job.conclusion).1) {
+                    let _ = writeln!(
+                        out,
+                        "To see the logs for the failed steps, try: gtx run view --log-failed --job={job_id}"
+                    );
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "To see the full job log, try: gtx run view --log --job={job_id}"
+                    );
+                }
+            }
+        }
+        let _ = writeln!(out, "View this run on Gitea: {url}");
+        out
+    }
+}
+
+/// gh's JOBS list: one line per job, plus its steps when `verbose` or the
+/// job failed.
+fn render_jobs(jobs: &[gitea_api::types::ActionWorkflowJob], verbose: bool) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for job in jobs {
+        let elapsed = match (set_time(job.started_at), set_time(job.completed_at)) {
+            (Some(start), Some(end)) if end >= start => {
+                format!(" in {}", go_duration((end - start).num_seconds()))
+            }
+            _ => String::new(),
+        };
+        let _ = writeln!(
+            out,
+            "{} {}{elapsed} (ID {})",
+            gh_symbol(&job.status, &job.conclusion),
+            job.name.as_deref().unwrap_or(""),
+            job.id.unwrap_or(0),
+        );
+        if verbose || is_failure_conclusion(outcome(&job.status, &job.conclusion).1) {
+            for step in &job.steps {
+                let _ = writeln!(
+                    out,
+                    "  {} {}",
+                    gh_symbol(&step.status, &step.conclusion),
+                    step.name.as_deref().unwrap_or("")
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The step name for log lines before any step started.
+const SETUP_STEP: &str = "Set up job";
+
+/// Split a Gitea job log into `(step, line)` pairs, `step` indexing
+/// `job.steps` or `None` for [`SETUP_STEP`].
+///
+/// Gitea's log API returns the job's whole log with no step markers (the
+/// server's per-step offsets aren't exposed). Each line starts with the
+/// runner's RFC 3339 timestamp, and steps carry start times truncated to the
+/// second, recorded a little after their first lines. So a line belongs to
+/// the last step to start at or before its timestamp rounded up to the
+/// second; untimestamped lines follow the previous line.
+fn split_job_log<'a>(
+    job: &gitea_api::types::ActionWorkflowJob,
+    log: &'a str,
+) -> Vec<(Option<usize>, &'a str)> {
+    let starts: Vec<(usize, i64)> = job
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| Some((i, set_time(s.started_at)?.timestamp())))
+        .collect();
+    let mut step = None;
+    log.lines()
+        .map(|line| {
+            let ts = line
+                .split_once(' ')
+                .and_then(|(ts, _)| DateTime::parse_from_rfc3339(ts).ok());
+            if let Some(ts) = ts {
+                let secs = ts.timestamp() + i64::from(ts.timestamp_subsec_nanos() > 0);
+                step = starts
+                    .iter()
+                    .filter(|(_, start)| *start <= secs)
+                    .map(|(i, _)| *i)
+                    .next_back();
+            }
+            (step, line)
+        })
+        .collect()
+}
+
+/// gh's `--log`/`--log-failed` output: each line as `JOB\tSTEP\tLINE`.
+async fn print_run_log(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    jobs: &[gitea_api::types::ActionWorkflowJob],
+    failed_only: bool,
+) -> Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    for job in jobs {
+        let job_failed = is_failure_conclusion(outcome(&job.status, &job.conclusion).1);
+        // A job that never started has no log.
+        if (failed_only && !job_failed) || set_time(job.started_at).is_none() {
+            continue;
+        }
+        let step_failed = |s: &gitea_api::types::ActionWorkflowStep| {
+            is_failure_conclusion(outcome(&s.status, &s.conclusion).1)
+        };
+        // Set-up lines count as failed when the job failed before any
+        // step that ran failed (e.g. its container never came up).
+        let setup_failed = job_failed
+            && !job
+                .steps
+                .iter()
+                .any(|s| set_time(s.started_at).is_some() && step_failed(s));
+        let log = api
+            .raw_get(&format!(
+                "repos/{owner}/{repo}/actions/jobs/{}/logs",
+                job.id.unwrap_or(0)
+            ))
+            .await
+            .map_err(|e| eyre::eyre!("{e}"))?;
+        let job_name = job.name.as_deref().unwrap_or("");
+        for (step, line) in split_job_log(job, &log) {
+            let (name, failed) = match step {
+                Some(i) => {
+                    let s = &job.steps[i];
+                    (s.name.as_deref().unwrap_or(""), step_failed(s))
+                }
+                None => (SETUP_STEP, setup_failed),
+            };
+            if failed_only && !failed {
+                continue;
+            }
+            writeln!(out, "{job_name}\t{name}\t{line}")?;
+        }
+    }
+    Ok(())
+}
+
+async fn cancel_run(repo_args: &repo::RepoArgs, args: &CancelArgs) -> Result<()> {
+    let config = Config::load()?;
+    let api = config.client()?;
+    let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
+    let (owner, name) = (repo_info.owner.as_str(), repo_info.name.as_str());
+
+    let id = match args.id {
+        Some(id) => id,
+        None if atty_check() => pick_run(&api, owner, name, "Select a workflow run", true).await?,
+        None => eyre::bail!("run ID required when not running interactively"),
+    };
+    let resp = api
+        .raw_request(
+            gitea_api::Method::POST,
+            &format!("repos/{owner}/{name}/actions/runs/{id}/cancel"),
+            None,
+        )
+        .await
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        eyre::bail!("Cannot cancel a workflow run that is completed");
+    }
+    gitea_api::error_for_status(resp)
+        .await
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    println!("✓ Request to cancel workflow {id} submitted.");
     Ok(())
 }
 
@@ -648,7 +1043,15 @@ fn format_run_picker_label(run: &gitea_api::types::ActionWorkflowRun) -> String 
     format!("{icon} #{id} {branch} {title}")
 }
 
-async fn pick_run(api: &gitea_api::Gitea, owner: &str, repo: &str) -> Result<i64> {
+/// Prompt for a run: in-progress runs first, then (unless
+/// `in_progress_only`) recent ones.
+async fn pick_run(
+    api: &gitea_api::Gitea,
+    owner: &str,
+    repo: &str,
+    prompt: &str,
+    in_progress_only: bool,
+) -> Result<i64> {
     let resp = api
         .get_workflow_runs()
         .owner(owner)
@@ -660,7 +1063,13 @@ async fn pick_run(api: &gitea_api::Gitea, owner: &str, repo: &str) -> Result<i64
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?
         .into_inner();
 
-    let (in_progress, recent) = partition_runs_for_picker(resp.workflow_runs);
+    let (in_progress, mut recent) = partition_runs_for_picker(resp.workflow_runs);
+    if in_progress_only {
+        if in_progress.is_empty() {
+            eyre::bail!("found no in progress runs to cancel");
+        }
+        recent.clear();
+    }
 
     if in_progress.is_empty() && recent.is_empty() {
         eprintln!("No workflow runs found");
@@ -684,7 +1093,7 @@ async fn pick_run(api: &gitea_api::Gitea, owner: &str, repo: &str) -> Result<i64
         ids.push(run.id.unwrap_or(0));
     }
 
-    let chosen = match inquire::Select::new("Pick a run to watch:", labels.clone()).prompt() {
+    let chosen = match inquire::Select::new(prompt, labels.clone()).prompt() {
         Ok(s) => s,
         Err(inquire::InquireError::OperationCanceled)
         | Err(inquire::InquireError::OperationInterrupted) => {
@@ -714,7 +1123,9 @@ async fn watch_run(repo_args: &repo::RepoArgs, args: &WatchArgs) -> Result<()> {
     let run_ids = match (args.id, &args.commit) {
         (Some(id), _) => vec![id],
         (None, Some(sha)) => wait_for_commit_runs(&api, owner, repo_name, sha, args).await?,
-        (None, None) => vec![pick_run(&api, owner, repo_name).await?],
+        (None, None) => {
+            vec![pick_run(&api, owner, repo_name, "Pick a run to watch:", false).await?]
+        }
     };
 
     let mut any_failed = false;
@@ -1160,5 +1571,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(format_run_picker_label(&run), "✗ #281 feature t");
+    }
+
+    #[test]
+    fn go_duration_matches_go() {
+        assert_eq!(go_duration(0), "0s");
+        assert_eq!(go_duration(45), "45s");
+        assert_eq!(go_duration(63), "1m3s");
+        assert_eq!(go_duration(3600), "1h0m0s");
+        assert_eq!(go_duration(3723), "1h2m3s");
+    }
+
+    #[test]
+    fn symbols_follow_gh() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(gh_symbol(&s("completed"), &s("success")), "✓");
+        assert_eq!(gh_symbol(&s("success"), &None), "✓");
+        assert_eq!(gh_symbol(&s("completed"), &s("skipped")), "-");
+        assert_eq!(gh_symbol(&s("completed"), &s("cancelled")), "X");
+        assert_eq!(gh_symbol(&s("failure"), &None), "X");
+        assert_eq!(gh_symbol(&s("in_progress"), &None), "*");
+        assert_eq!(gh_symbol(&s("queued"), &None), "*");
     }
 }
