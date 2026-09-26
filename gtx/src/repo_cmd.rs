@@ -80,6 +80,20 @@ struct CreateArgs {
     /// Make repository private
     #[arg(long)]
     private: bool,
+
+    /// Add a README file (otherwise the repository is created empty)
+    #[arg(long)]
+    add_readme: bool,
+
+    /// Specify a gitignore template for the repository (also adds a README: Gitea
+    /// always writes one when it initializes a repository)
+    #[arg(short, long, value_name = "TEMPLATE")]
+    gitignore: Option<String>,
+
+    /// Specify a license template for the repository (also adds a README: Gitea
+    /// always writes one when it initializes a repository)
+    #[arg(short, long, value_name = "LICENSE")]
+    license: Option<String>,
 }
 
 #[derive(Args)]
@@ -446,12 +460,24 @@ async fn create_repo(repo_args: &repo::RepoArgs, args: &CreateArgs) -> Result<()
     let api = config.client()?;
 
     let body = |mut b: gitea_api::types::builder::CreateRepoOption| {
-        b = b
-            .name(name.to_string())
-            .private(args.private)
-            .auto_init(true);
+        b = b.name(name.to_string()).private(args.private);
         if let Some(desc) = &args.description {
             b = b.description(desc.clone());
+        }
+        // Like `gh repo create`, the repository is empty unless a README,
+        // gitignore, or license is asked for. Gitea applies the templates only
+        // while initializing, so any of them turns on `auto_init`.
+        if args.add_readme || args.gitignore.is_some() || args.license.is_some() {
+            b = b.auto_init(true);
+        }
+        if args.add_readme {
+            b = b.readme("Default".to_string());
+        }
+        if let Some(gitignore) = &args.gitignore {
+            b = b.gitignores(gitignore.clone());
+        }
+        if let Some(license) = &args.license {
+            b = b.license(license.clone());
         }
         b
     };
