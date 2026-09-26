@@ -84,23 +84,23 @@ impl ApiCommand {
             .parse()
             .map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
 
-        let has_fields = self.has_fields();
-        // With --input the file is the body and fields go in the query
-        // string, as in gh; otherwise fields are the JSON body.
-        let fields = if has_fields {
+        let fields = if self.has_fields() {
             Some(self.build_body()?)
         } else {
             None
         };
+        // As in gh: fields go in the query string for a GET or alongside
+        // --input (whose file is the body); otherwise they are the JSON body.
+        let fields_in_query = method == "GET" || self.input.is_some();
+        if fields_in_query && let Some(serde_json::Value::Object(map)) = &fields {
+            add_query_params(&mut url, map);
+        }
         let curl_body = match (&self.input, &fields) {
-            (Some(path), _) => {
-                if let Some(serde_json::Value::Object(map)) = &fields {
-                    add_query_params(&mut url, map);
-                }
-                Some(CurlBody::File(path.clone()))
+            (Some(path), _) => Some(CurlBody::File(path.clone())),
+            (None, Some(fields)) if !fields_in_query => {
+                Some(CurlBody::Inline(serde_json::to_string(fields)?))
             }
-            (None, Some(fields)) => Some(CurlBody::Inline(serde_json::to_string(fields)?)),
-            (None, None) => None,
+            (None, _) => None,
         };
 
         if self.curl {
@@ -124,7 +124,7 @@ impl ApiCommand {
         };
 
         if self.paginate {
-            self.run_paginated(&api, &url, &method, &body).await
+            self.run_paginated(&api, &url).await
         } else {
             self.run_single(&api, &url, &method, &body).await
         }
@@ -227,13 +227,9 @@ impl ApiCommand {
         Ok(())
     }
 
-    async fn run_paginated(
-        &self,
-        api: &gitea_api::Gitea,
-        base_url: &url::Url,
-        method: &str,
-        body: &Option<Vec<u8>>,
-    ) -> Result<()> {
+    /// Page through a GET: `check_paginate` rules out `--input` and every
+    /// other method, so there is never a body.
+    async fn run_paginated(&self, api: &gitea_api::Gitea, base_url: &url::Url) -> Result<()> {
         let mut page = 1u32;
         loop {
             let mut url = base_url.clone();
@@ -242,7 +238,7 @@ impl ApiCommand {
                 url.query_pairs_mut().append_pair("limit", "50");
             }
 
-            let resp = self.send_request(api, &url, method, body).await?;
+            let resp = self.send_request(api, &url, "GET", &None).await?;
 
             let text = resp.text().await?;
             if let Some(cfg) = gitea_api::verbose::config()
@@ -348,8 +344,9 @@ fn read_input(path: &str) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| eyre::eyre!("Failed to read {path}: {e}"))
 }
 
-/// Append fields to the URL's query string, as gh does for fields sent
-/// alongside `--input`. Strings go as-is, null as empty, others as JSON text.
+/// Append fields to the URL's query string, as gh does for a GET or for
+/// fields sent alongside `--input`. Strings go as-is, null as empty, others
+/// as JSON text.
 fn add_query_params(url: &mut url::Url, fields: &serde_json::Map<String, serde_json::Value>) {
     let mut pairs = url.query_pairs_mut();
     for (key, value) in fields {
