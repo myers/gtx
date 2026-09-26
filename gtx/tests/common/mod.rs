@@ -49,6 +49,7 @@ pub struct FakeGitea {
     seen: Arc<Mutex<Vec<String>>>,
     auth: Arc<Mutex<Vec<Option<String>>>>,
     bodies: Arc<Mutex<Vec<String>>>,
+    content_types: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl FakeGitea {
@@ -74,6 +75,8 @@ impl FakeGitea {
         let auth_thread = Arc::clone(&auth);
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let bodies_thread = Arc::clone(&bodies);
+        let content_types = Arc::new(Mutex::new(Vec::new()));
+        let content_types_thread = Arc::clone(&content_types);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -84,6 +87,7 @@ impl FakeGitea {
                 }
                 let mut content_length = 0usize;
                 let mut authorization = None;
+                let mut content_type = None;
                 loop {
                     let mut header = String::new();
                     if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
@@ -99,6 +103,11 @@ impl FakeGitea {
                     {
                         authorization = Some(value.trim().to_string());
                     }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-type")
+                    {
+                        content_type = Some(value.trim().to_string());
+                    }
                 }
                 let mut req_body = vec![0; content_length];
                 let _ = reader.read_exact(&mut req_body);
@@ -112,6 +121,7 @@ impl FakeGitea {
                     .unwrap()
                     .push(format!("{method} {target}"));
                 auth_thread.lock().unwrap().push(authorization);
+                content_types_thread.lock().unwrap().push(content_type);
                 bodies_thread
                     .lock()
                     .unwrap()
@@ -140,6 +150,7 @@ impl FakeGitea {
             seen,
             auth,
             bodies,
+            content_types,
         }
     }
 
@@ -166,5 +177,10 @@ impl FakeGitea {
     /// Request body of each request (lossy UTF-8), parallel to [`Self::seen`].
     pub fn bodies(&self) -> Vec<String> {
         self.bodies.lock().unwrap().clone()
+    }
+
+    /// `Content-Type` header of each request, parallel to [`Self::seen`].
+    pub fn content_types(&self) -> Vec<Option<String>> {
+        self.content_types.lock().unwrap().clone()
     }
 }

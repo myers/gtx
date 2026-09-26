@@ -289,13 +289,14 @@ impl Gitea {
     }
 
     /// Make a fully customizable request. Used by `gtx api` for arbitrary endpoints
-    /// with custom headers, methods, and bodies.
+    /// with custom headers, methods, and bodies. The body goes out verbatim,
+    /// as `Content-Type: application/json` unless `headers` sets one.
     pub async fn request(
         &self,
         method: reqwest::Method,
         url: &str,
         headers: &[(String, String)],
-        body: Option<&serde_json::Value>,
+        body: Option<&[u8]>,
     ) -> Result<reqwest::Response, GiteaError> {
         let mut req = self.reqwest_client.request(method, url);
         req = req.header("Accept", "application/json");
@@ -303,7 +304,13 @@ impl Gitea {
             req = req.header(key.as_str(), value.as_str());
         }
         if let Some(body) = body {
-            req = req.header("Content-Type", "application/json").json(body);
+            if !headers
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+            {
+                req = req.header("Content-Type", "application/json");
+            }
+            req = req.body(body.to_vec());
         }
         let mut built = req.build()?;
         verbose::apply_auth_headers(&mut built);

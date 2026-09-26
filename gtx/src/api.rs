@@ -22,6 +22,11 @@ pub struct ApiCommand {
     #[arg(short = 'F', long = "field", value_name = "KEY=VALUE")]
     fields: Vec<String>,
 
+    /// The file to use as body for the HTTP request (use "-" to read from
+    /// standard input). Sent verbatim; -f/-F fields become query parameters.
+    #[arg(long, value_name = "FILE")]
+    input: Option<String>,
+
     /// Add a request header (key:value)
     #[arg(short = 'H', long = "header", value_name = "KEY:VALUE")]
     headers: Vec<String>,
@@ -71,17 +76,17 @@ impl ApiCommand {
         let endpoint = self.expand_placeholders(&config)?;
 
         // Build the full URL using the API crate
-        let url: url::Url = api
+        let mut url: url::Url = api
             .url_for(&endpoint)
             .parse()
             .map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
 
         // Determine method
-        let has_body_fields = !self.raw_fields.is_empty() || !self.fields.is_empty();
+        let has_fields = !self.raw_fields.is_empty() || !self.fields.is_empty();
         let method = match &self.method {
             Some(m) => m.to_uppercase(),
             None => {
-                if has_body_fields {
+                if has_fields || self.input.is_some() {
                     "POST".to_string()
                 } else {
                     "GET".to_string()
@@ -89,11 +94,22 @@ impl ApiCommand {
             }
         };
 
-        // Build request body
-        let body = if has_body_fields {
+        // With --input the file is the body and fields go in the query
+        // string, as in gh; otherwise fields are the JSON body.
+        let fields = if has_fields {
             Some(self.build_body()?)
         } else {
             None
+        };
+        let curl_body = match (&self.input, &fields) {
+            (Some(path), _) => {
+                if let Some(serde_json::Value::Object(map)) = &fields {
+                    add_query_params(&mut url, map);
+                }
+                Some(CurlBody::File(path.clone()))
+            }
+            (None, Some(fields)) => Some(CurlBody::Inline(serde_json::to_string(fields)?)),
+            (None, None) => None,
         };
 
         if self.curl {
@@ -102,13 +118,19 @@ impl ApiCommand {
                 &method,
                 &url,
                 &self.headers,
-                body.as_ref(),
+                curl_body.as_ref(),
                 &config.token,
                 show_secrets,
             );
             println!("{line}");
             return Ok(());
         }
+
+        let body = match curl_body {
+            Some(CurlBody::File(path)) => Some(read_input(&path)?),
+            Some(CurlBody::Inline(json)) => Some(json.into_bytes()),
+            None => None,
+        };
 
         if self.paginate {
             self.run_paginated(&api, &url, &method, &body).await
@@ -149,7 +171,7 @@ impl ApiCommand {
         api: &gitea_api::Gitea,
         url: &url::Url,
         method: &str,
-        body: &Option<serde_json::Value>,
+        body: &Option<Vec<u8>>,
     ) -> Result<()> {
         let resp = self.send_request(api, url, method, body).await?;
 
@@ -183,7 +205,7 @@ impl ApiCommand {
         api: &gitea_api::Gitea,
         base_url: &url::Url,
         method: &str,
-        body: &Option<serde_json::Value>,
+        body: &Option<Vec<u8>>,
     ) -> Result<()> {
         let mut page = 1u32;
         loop {
@@ -226,7 +248,7 @@ impl ApiCommand {
         api: &gitea_api::Gitea,
         url: &url::Url,
         method: &str,
-        body: &Option<serde_json::Value>,
+        body: &Option<Vec<u8>>,
     ) -> Result<gitea_api::Response> {
         // Parse custom headers
         let mut headers = Vec::new();
@@ -242,7 +264,7 @@ impl ApiCommand {
             .map_err(|_| eyre::eyre!("Unsupported HTTP method: {method}"))?;
 
         let resp = api
-            .request(method, url.as_str(), &headers, body.as_ref())
+            .request(method, url.as_str(), &headers, body.as_deref())
             .await
             .map_err(|e| eyre::eyre!("{e}"))?;
 
@@ -281,14 +303,48 @@ impl ApiCommand {
     }
 }
 
+/// A request body as `--curl` renders it.
+enum CurlBody {
+    /// JSON built from fields, inlined as `--data-raw '<json>'`.
+    Inline(String),
+    /// An `--input` file (or `-` for stdin), passed as `--data-binary @<file>`.
+    File(String),
+}
+
+/// Read an `--input` body: the file's bytes, or stdin's for `-`.
+fn read_input(path: &str) -> Result<Vec<u8>> {
+    if path == "-" {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+        return Ok(buf);
+    }
+    std::fs::read(path).map_err(|e| eyre::eyre!("Failed to read {path}: {e}"))
+}
+
+/// Append fields to the URL's query string, as gh does for fields sent
+/// alongside `--input`. Strings go as-is, null as empty, others as JSON text.
+fn add_query_params(url: &mut url::Url, fields: &serde_json::Map<String, serde_json::Value>) {
+    let mut pairs = url.query_pairs_mut();
+    for (key, value) in fields {
+        let value = match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        pairs.append_pair(key, &value);
+    }
+}
+
 /// Render an equivalent `curl` command for a given request. Authorization
-/// header is masked unless `show_secrets` is true. The body, when present,
-/// is rendered as `--data-raw '<json>'` with single quotes escaped.
+/// header is masked unless `show_secrets` is true. An inline body is rendered
+/// as `--data-raw '<json>'` with single quotes escaped, a file body as
+/// `--data-binary @<file>`; either gets `Content-Type: application/json`
+/// unless a custom header sets one.
 fn build_curl_command(
     method: &str,
     url: &url::Url,
     custom_headers: &[String],
-    body: Option<&serde_json::Value>,
+    body: Option<&CurlBody>,
     token: &str,
     show_secrets: bool,
 ) -> String {
@@ -308,10 +364,23 @@ fn build_curl_command(
     }
 
     if let Some(body) = body {
-        let json = serde_json::to_string(body).unwrap_or_default();
-        let escaped = json.replace('\'', r"'\''");
-        parts.push("-H 'Content-Type: application/json'".to_string());
-        parts.push(format!("--data-raw '{escaped}'"));
+        let has_content_type = custom_headers.iter().any(|h| {
+            h.split_once(':')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("content-type"))
+        });
+        if !has_content_type {
+            parts.push("-H 'Content-Type: application/json'".to_string());
+        }
+        match body {
+            CurlBody::Inline(json) => {
+                let escaped = json.replace('\'', r"'\''");
+                parts.push(format!("--data-raw '{escaped}'"));
+            }
+            CurlBody::File(path) => {
+                let escaped = path.replace('\'', r"'\''");
+                parts.push(format!("--data-binary '@{escaped}'"));
+            }
+        }
     }
 
     parts.join(" \\\n  ")
@@ -437,7 +506,7 @@ mod tests {
         let url: url::Url = "https://gt.example/api/v1/repos/o/r/issues"
             .parse()
             .unwrap();
-        let body = serde_json::json!({"title": "hi", "body": "what's up"});
+        let body = CurlBody::Inline(r#"{"title":"hi","body":"what's up"}"#.to_string());
         let line = build_curl_command("POST", &url, &[], Some(&body), "tok12345678abcd", false);
         assert!(line.contains("-X POST"));
         assert!(line.contains("Content-Type: application/json"));
@@ -448,12 +517,48 @@ mod tests {
     #[test]
     fn test_curl_escapes_single_quotes_in_body() {
         let url: url::Url = "https://gt.example/api/v1/x".parse().unwrap();
-        let body = serde_json::json!({"msg": "it's fine"});
+        let body = CurlBody::Inline(r#"{"msg":"it's fine"}"#.to_string());
         let line = build_curl_command("POST", &url, &[], Some(&body), "tok12345678abcd", false);
         assert!(
             line.contains(r"'\''"),
             "expected single-quote escape, got: {line}"
         );
+    }
+
+    #[test]
+    fn test_curl_renders_input_file_as_data_binary() {
+        let url: url::Url = "https://gt.example/api/v1/x".parse().unwrap();
+        let body = CurlBody::File("files.json".to_string());
+        let line = build_curl_command("POST", &url, &[], Some(&body), "tok12345678abcd", false);
+        assert!(line.contains("--data-binary '@files.json'"), "got: {line}");
+        assert!(
+            line.contains("Content-Type: application/json"),
+            "got: {line}"
+        );
+    }
+
+    #[test]
+    fn test_curl_keeps_custom_content_type() {
+        let url: url::Url = "https://gt.example/api/v1/x".parse().unwrap();
+        let headers = vec!["Content-Type: text/plain".to_string()];
+        let body = CurlBody::File("-".to_string());
+        let line = build_curl_command(
+            "POST",
+            &url,
+            &headers,
+            Some(&body),
+            "tok12345678abcd",
+            false,
+        );
+        assert!(
+            !line.contains("Content-Type: application/json"),
+            "got: {line}"
+        );
+        assert!(
+            line.contains("-H 'Content-Type: text/plain'"),
+            "got: {line}"
+        );
+        assert!(line.contains("--data-binary '@-'"), "got: {line}");
     }
 
     #[test]
