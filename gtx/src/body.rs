@@ -16,6 +16,27 @@ pub fn read_body_file(path: &str) -> Result<String> {
     Ok(std::fs::read_to_string(p)?)
 }
 
+/// Resolve a comment body from gh's mutually exclusive `-b/--body` and
+/// `-F/--body-file`. As with `issue create -F`, local image/file refs in a body
+/// file are uploaded as attachments of issue/PR `index` and rewritten to their URLs.
+#[allow(clippy::too_many_arguments)]
+pub async fn comment_body(
+    api: &gitea_api::Gitea,
+    config: &crate::config::Config,
+    owner: &str,
+    repo: &str,
+    index: i64,
+    body: Option<&str>,
+    body_file: Option<&str>,
+) -> Result<String> {
+    let Some(path) = body_file else {
+        return Ok(body.unwrap_or_default().to_string());
+    };
+    let text = read_body_file(path)?;
+    let base_dir = Path::new(path).parent().unwrap_or(Path::new(""));
+    upload_and_rewrite(api, config, owner, repo, index, &text, base_dir).await
+}
+
 /// Markdown link/image pattern: `![alt](path)` or `[text](path)`
 /// Returns Vec of (full_match, path) for local file references.
 pub fn find_local_refs(body: &str, base_dir: &Path) -> Vec<(String, String)> {

@@ -168,13 +168,18 @@ struct ReopenArgs {
 }
 
 #[derive(Args)]
+#[command(group(clap::ArgGroup::new("input").required(true).args(["body", "body_file"])))]
 struct CommentArgs {
     /// Issue number
     number: i64,
 
     /// Comment body
     #[arg(short, long)]
-    body: String,
+    body: Option<String>,
+
+    /// Read body text from file ("-" for stdin; local image/file refs are uploaded as attachments)
+    #[arg(short = 'F', long)]
+    body_file: Option<String>,
 }
 
 #[derive(Args)]
@@ -840,11 +845,21 @@ async fn comment_issue(repo_args: &repo::RepoArgs, args: &CommentArgs) -> Result
     let repo_info = repo::resolve_repo(repo_args.repo.as_deref(), &config.url)?;
     let (owner, repo) = (repo_info.owner.as_str(), repo_info.name.as_str());
 
+    let body = crate::body::comment_body(
+        &api,
+        &config,
+        owner,
+        repo,
+        args.number,
+        args.body.as_deref(),
+        args.body_file.as_deref(),
+    )
+    .await?;
     api.issue_create_comment()
         .owner(owner)
         .repo(repo)
         .index(args.number)
-        .body_map(|b| b.body(args.body.clone()))
+        .body_map(|b| b.body(body))
         .send()
         .await
         .map_err(|e| eyre::eyre!("{}", gitea_api::GiteaError::from(e)))?;
