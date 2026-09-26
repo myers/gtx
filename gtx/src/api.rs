@@ -69,6 +69,9 @@ pub struct ApiCommand {
 
 impl ApiCommand {
     pub async fn run(&self) -> Result<()> {
+        let method = self.method();
+        self.check_paginate(&method)?;
+
         let config = Config::load()?;
         let api = config.client()?;
 
@@ -81,19 +84,7 @@ impl ApiCommand {
             .parse()
             .map_err(|e| eyre::eyre!("Invalid URL: {e}"))?;
 
-        // Determine method
-        let has_fields = !self.raw_fields.is_empty() || !self.fields.is_empty();
-        let method = match &self.method {
-            Some(m) => m.to_uppercase(),
-            None => {
-                if has_fields || self.input.is_some() {
-                    "POST".to_string()
-                } else {
-                    "GET".to_string()
-                }
-            }
-        };
-
+        let has_fields = self.has_fields();
         // With --input the file is the body and fields go in the query
         // string, as in gh; otherwise fields are the JSON body.
         let fields = if has_fields {
@@ -137,6 +128,42 @@ impl ApiCommand {
         } else {
             self.run_single(&api, &url, &method, &body).await
         }
+    }
+
+    fn has_fields(&self) -> bool {
+        !self.raw_fields.is_empty() || !self.fields.is_empty()
+    }
+
+    /// The effective method: `-X` if given, else POST when there are fields
+    /// or `--input`, else GET (as in gh).
+    fn method(&self) -> String {
+        match &self.method {
+            Some(m) => m.to_uppercase(),
+            None if self.has_fields() || self.input.is_some() => "POST".to_string(),
+            None => "GET".to_string(),
+        }
+    }
+
+    /// gh's `--paginate` checks, with one divergence: gh tests only the `-X`
+    /// value (default GET), so `--paginate -f k=v` passes there and then goes
+    /// out as a POST, once per page. We test the effective method instead,
+    /// so a paginated request can never repeat a write.
+    fn check_paginate(&self, method: &str) -> Result<()> {
+        if !self.paginate {
+            return Ok(());
+        }
+        if self.input.is_some() {
+            eyre::bail!("the `--paginate` option is not supported with `--input`");
+        }
+        if method != "GET" {
+            let hint = if self.method.is_none() {
+                " (fields make the request a POST; pass `-X GET` to send them with a GET)"
+            } else {
+                ""
+            };
+            eyre::bail!("the `--paginate` option is not supported for non-GET requests{hint}");
+        }
+        Ok(())
     }
 
     fn expand_placeholders(&self, config: &Config) -> Result<String> {
