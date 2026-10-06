@@ -243,11 +243,17 @@ fn test_gtx_config_override() {
     assert!(!tmp.path().join("home").exists());
 }
 
-/// Test that the first run migrates ~/.config/gt to ~/.config/gtx
+/// Test that the first run migrates the config dir from `gt` to `gtx`
+/// (`~/.config/gt` on Linux, `~/Library/Application Support/gt` on macOS).
 #[test]
 fn test_migrates_old_config_dir() {
     let home = tempfile::tempdir().unwrap();
-    let old = home.path().join(".config/gt");
+    let config_dir = home.path().join(if cfg!(target_os = "macos") {
+        "Library/Application Support"
+    } else {
+        ".config"
+    });
+    let old = config_dir.join("gt");
     std::fs::create_dir_all(&old).unwrap();
     std::fs::write(
         old.join("config.toml"),
@@ -266,7 +272,7 @@ fn test_migrates_old_config_dir() {
         .stdout(predicate::str::contains("https://old.example"))
         .stderr(predicate::str::contains("Migrated config"));
 
-    assert!(home.path().join(".config/gtx/config.toml").is_file());
+    assert!(config_dir.join("gtx/config.toml").is_file());
 }
 
 /// `repo create` names its owner as OWNER/NAME; -R would be silently ignored, so reject it.
