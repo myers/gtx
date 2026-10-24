@@ -293,8 +293,9 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
     let gt_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "gtx".to_string());
+    let home = std::env::var("HOME").ok();
 
-    let helper_value = format!("!{gt_path} auth git-credential");
+    let helper_value = helper_command(&gt_path, home.as_deref());
 
     for host in &hosts {
         let key = format!("credential.{host}.helper");
@@ -302,15 +303,27 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
         let existing = std::process::Command::new("git")
             .args(["config", "--global", "--get-all", &key])
             .output()?;
+        let existing = String::from_utf8_lossy(&existing.stdout).into_owned();
 
-        let already_set = String::from_utf8_lossy(&existing.stdout)
-            .lines()
-            .any(|line| line.trim() == helper_value);
+        let already_set = existing.lines().any(|line| line.trim() == helper_value);
 
         if !already_set {
-            let has_reset = String::from_utf8_lossy(&existing.stdout)
-                .lines()
-                .any(|line| line.trim().is_empty());
+            // Drop gtx helpers written with another path (e.g. an absolute
+            // one from before $HOME), so they don't pile up beside the new one.
+            for stale in existing.lines().map(str::trim).filter(|l| is_gtx_helper(l)) {
+                std::process::Command::new("git")
+                    .args([
+                        "config",
+                        "--global",
+                        "--fixed-value",
+                        "--unset-all",
+                        &key,
+                        stale,
+                    ])
+                    .status()?;
+            }
+
+            let has_reset = existing.lines().any(|line| line.trim().is_empty());
 
             if !has_reset {
                 std::process::Command::new("git")
@@ -331,6 +344,25 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The `credential.<host>.helper` value pointing at `exe`. Git runs `!` helpers
+/// through `sh`, so an exe under `$HOME` is written as `$HOME/...` — the line
+/// then works on every machine that shares the gitconfig (dotfiles), whatever
+/// the home directory is called there.
+fn helper_command(exe: &str, home: Option<&str>) -> String {
+    let home = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty());
+    let exe = match home.and_then(|h| exe.strip_prefix(h)) {
+        Some(rest) if rest.starts_with('/') => format!("$HOME{rest}"),
+        _ => exe.to_string(),
+    };
+    format!("!{exe} auth git-credential")
+}
+
+fn is_gtx_helper(value: &str) -> bool {
+    value.starts_with('!') && value.ends_with(" auth git-credential")
 }
 
 fn git_credential(args: &GitCredentialArgs) -> Result<()> {
@@ -372,7 +404,51 @@ fn git_credential(args: &GitCredentialArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::mask_token;
+    use super::{helper_command, is_gtx_helper, mask_token};
+
+    #[test]
+    fn helper_under_home_uses_home_var() {
+        assert_eq!(
+            helper_command("/Users/me/.cargo/bin/gtx", Some("/Users/me")),
+            "!$HOME/.cargo/bin/gtx auth git-credential"
+        );
+        assert_eq!(
+            helper_command("/home/me/.cargo/bin/gtx", Some("/home/me/")),
+            "!$HOME/.cargo/bin/gtx auth git-credential"
+        );
+    }
+
+    #[test]
+    fn helper_outside_home_keeps_absolute_path() {
+        assert_eq!(
+            helper_command("/usr/local/bin/gtx", Some("/home/me")),
+            "!/usr/local/bin/gtx auth git-credential"
+        );
+        // A sibling dir sharing the prefix is not under $HOME.
+        assert_eq!(
+            helper_command("/home/meg/bin/gtx", Some("/home/me")),
+            "!/home/meg/bin/gtx auth git-credential"
+        );
+        assert_eq!(
+            helper_command("/home/me/bin/gtx", None),
+            "!/home/me/bin/gtx auth git-credential"
+        );
+        assert_eq!(
+            helper_command("/home/me/bin/gtx", Some("")),
+            "!/home/me/bin/gtx auth git-credential"
+        );
+    }
+
+    #[test]
+    fn recognizes_gtx_helpers_only() {
+        assert!(is_gtx_helper(
+            "!/Users/me/.cargo/bin/gtx auth git-credential"
+        ));
+        assert!(is_gtx_helper("!$HOME/.cargo/bin/gtx auth git-credential"));
+        assert!(!is_gtx_helper(""));
+        assert!(!is_gtx_helper("store"));
+        assert!(!is_gtx_helper("!gh auth git-credential --other"));
+    }
 
     // gh's displayToken: keep the prefix up to the last `_`, star the rest.
     #[test]
