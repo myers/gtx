@@ -307,22 +307,27 @@ fn setup_git(args: &SetupGitArgs) -> Result<()> {
 
         let already_set = existing.lines().any(|line| line.trim() == helper_value);
 
-        if !already_set {
-            // Drop gtx helpers written with another path (e.g. an absolute
-            // one from before $HOME), so they don't pile up beside the new one.
-            for stale in existing.lines().map(str::trim).filter(|l| is_gtx_helper(l)) {
-                std::process::Command::new("git")
-                    .args([
-                        "config",
-                        "--global",
-                        "--fixed-value",
-                        "--unset-all",
-                        &key,
-                        stale,
-                    ])
-                    .status()?;
-            }
+        // Drop gtx helpers written with another path (e.g. an absolute one
+        // from before $HOME, or appended by an older build after this one ran),
+        // so they don't pile up beside the current one.
+        for stale in existing
+            .lines()
+            .map(str::trim)
+            .filter(|l| is_gtx_helper(l) && *l != helper_value)
+        {
+            std::process::Command::new("git")
+                .args([
+                    "config",
+                    "--global",
+                    "--fixed-value",
+                    "--unset-all",
+                    &key,
+                    stale,
+                ])
+                .status()?;
+        }
 
+        if !already_set {
             let has_reset = existing.lines().any(|line| line.trim().is_empty());
 
             if !has_reset {
